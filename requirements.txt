@@ -1,0 +1,34 @@
+# Core dependencies for Adaptive GraphRAG
+
+# PDF processing
+PyPDF2==3.0.1
+
+# Embeddings and Vector Search
+sentence-transformers==2.2.2
+faiss-cpu==1.7.4
+numpy==1.24.3
+
+# BM25 Keyword Search
+rank-bm25==0.2.2
+
+# Graph Processing
+networkx==3.1
+
+# Reranking
+sentence-transformers==2.2.2
+
+# LLM Generation
+groq==0.4.1
+
+# Web Application
+streamlit==1.28.1
+pyvis==0.3.2
+
+# Data Processing
+pandas==2.0.3
+
+# Test Data Generation
+reportlab==4.0.4
+
+# Utilities
+python-dotenv==1.0.0
