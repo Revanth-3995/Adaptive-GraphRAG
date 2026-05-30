@@ -1,4 +1,4 @@
-from bm25_index import BM25Retriever
+from retrieval.bm25_index import BM25Retriever
 
 r = BM25Retriever()
 corpus = [{'chunk_id':'1', 'text':'Hello world'}, {'chunk_id':'2', 'text':'Hello universe'}, {'chunk_id':'3', 'text':'Another completely different text'}]

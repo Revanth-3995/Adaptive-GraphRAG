@@ -2,11 +2,12 @@ import os
 import json
 import numpy as np
 import streamlit as st
-import networkx as nx
-from pyvis.network import Network
-import streamlit.components.v1 as components
+import shutil
+import re
+from datetime import datetime
 
 from embedder import Embedder
+from chunker import DocumentChunker
 from graph_builder import GraphBuilder
 from retrieval.bm25_index import BM25Retriever
 from retrieval.vector_search import VectorSearch
@@ -15,153 +16,345 @@ from retrieval.fusion import ResultFusion
 from retrieval.reranker import Reranker
 from llm import LLMGenerator
 
-# --- App Config ---
-st.set_page_config(page_title="Adaptive GraphRAG", layout="wide")
-st.title("🕸️ Adaptive GraphRAG")
+# -----------------------------------------------------------------------------
+# 2. PAGE CONFIG
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="GraphRAG", layout="wide")
 
-# --- Session State Initialization ---
-@st.cache_resource
-def load_system():
-    """Loads all models and indices into memory once."""
-    print("Loading system components...")
+
+# -----------------------------------------------------------------------------
+# 3. HELPER: get_existing_docs()
+# -----------------------------------------------------------------------------
+def get_existing_docs() -> list:
+    """Scans doc_store/ for ready docs and returns their doc_names."""
+    if not os.path.exists("doc_store"):
+        os.makedirs("doc_store", exist_ok=True)
+    ready_docs = []
+    for doc_name in os.listdir("doc_store"):
+        meta_path = f"doc_store/{doc_name}/meta.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if meta.get("status") == "ready":
+                    ready_docs.append(doc_name)
+            except Exception:
+                pass
+    return ready_docs
+
+
+# -----------------------------------------------------------------------------
+# 4. HELPER: ingest_pdf(uploaded_file)
+# -----------------------------------------------------------------------------
+def ingest_pdf(uploaded_file) -> dict:
+    """
+    Runs the full ingestion pipeline on an uploaded PDF.
+    Saves all indexes to doc_store/<doc_name>/.
+    Returns a metadata dict on success.
+    Raises an exception on failure.
+    """
+    filename = uploaded_file.name
+    # 1. Derive doc_name
+    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', filename.replace(".pdf", "")).lower()
+    doc_path = f"doc_store/{doc_name}"
+
+    # 2. Create directory
+    os.makedirs(doc_path, exist_ok=True)
     
-    # 1. Load Data
     try:
-        with open("graph/chunk_store.json", "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-        embeddings = np.load("embeddings/embeddings.npy")
+        # 3. Save uploaded bytes
+        source_path = f"{doc_path}/source.pdf"
+        with open(source_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+
+        # 4. Run chunker
+        chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
+        chunks = chunker.process_pdf(source_path)
+        with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
+            json.dump(chunks, f, ensure_ascii=False)
+
+        # 5. Run embedder
+        embedder = get_shared_models()["embedder"]
+        embeddings = embedder.generate_embeddings(chunks)
+        np.save(f"{doc_path}/embeddings.npy", embeddings)
+        
+        # 6. Build FAISS index
+        vs = VectorSearch()
+        vs.build_faiss_index(chunks, embeddings)
+        vs.save_index(index_path=f"{doc_path}/faiss.index", chunks_path=f"{doc_path}/faiss_chunks.pkl")
+
+        # 7. Build BM25 index
+        bm25 = BM25Retriever()
+        bm25.build_bm25_index(chunks)
+        bm25.save_index(output_path=f"{doc_path}/bm25_index.pkl")
+
+        # 8. Build knowledge graph
+        gb = GraphBuilder()
+        gb.build_graph(chunks, embeddings)
+        gb.save_graph(output_path=f"{doc_path}/graph.pkl")
+
+        # 9. Write meta.json
+        meta = {
+            "filename": filename,
+            "doc_name": doc_name,
+            "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "page_count": len(set([c.get("page_number", 0) for c in chunks])),
+            "chunk_count": len(chunks),
+            "status": "ready"
+        }
+        with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+        return meta
     except Exception as e:
-        return None, f"Data not found. Please run the ingestion pipeline first. ({e})"
-        
-    embedder = Embedder()
+        shutil.rmtree(doc_path, ignore_errors=True)
+        raise e
+
+
+# -----------------------------------------------------------------------------
+# 5. CACHED LOADER: get_shared_models()
+# -----------------------------------------------------------------------------
+@st.cache_resource
+def get_shared_models() -> dict:
+    return {
+        "embedder": Embedder(),
+        "llm": LLMGenerator(),
+        "reranker": Reranker()
+    }
+
+
+# -----------------------------------------------------------------------------
+# 6. CACHED LOADER: get_doc_system(doc_name)
+# -----------------------------------------------------------------------------
+def load_doc_systems(doc_name: str) -> dict:
+    """Loads all indexes for a single document into memory."""
+    doc_path = f"doc_store/{doc_name}"
     
-    gb = GraphBuilder()
-    try:
-        gb.load_graph()
-    except:
-        return None, "Graph not found. Run ingestion first."
+    with open(f"{doc_path}/chunks.json", "r", encoding="utf-8") as f:
+        chunks = json.load(f)
         
+    embeddings = np.load(f"{doc_path}/embeddings.npy")
+
     bm25 = BM25Retriever()
-    try:
-        bm25.load_index()
-    except:
-        return None, "BM25 index not found. Run ingestion first."
-        
+    bm25.load_index(input_path=f"{doc_path}/bm25_index.pkl")
+
     vs = VectorSearch()
-    try:
-        vs.load_index()
-    except:
-        return None, "FAISS index not found. Run ingestion first."
-        
+    vs.load_index(index_path=f"{doc_path}/faiss.index", chunks_path=f"{doc_path}/faiss_chunks.pkl")
+
+    gb = GraphBuilder()
+    gb.load_graph(input_path=f"{doc_path}/graph.pkl")
+
     gr = GraphRetriever(gb)
     fusion = ResultFusion()
-    reranker = Reranker()
-    llm = LLMGenerator()
     
     return {
         "chunks": chunks,
         "embeddings": embeddings,
-        "embedder": embedder,
-        "gb": gb,
         "bm25": bm25,
         "vs": vs,
+        "gb": gb,
         "gr": gr,
-        "fusion": fusion,
-        "reranker": reranker,
-        "llm": llm
-    }, None
+        "fusion": fusion
+    }
 
-systems, error = load_system()
+@st.cache_resource
+def get_doc_system(doc_name: str) -> dict:
+    return load_doc_systems(doc_name)
 
-if error:
-    st.error(error)
-    st.stop()
 
-# --- Sidebar Controls ---
-st.sidebar.header("Retrieval Parameters")
-top_k_initial = st.sidebar.slider("Initial Top-K (BM25 & Vector)", 5, 50, 10)
-graph_depth = st.sidebar.slider("Graph Traversal Depth", 0, 3, 1)
-use_bfs = st.sidebar.checkbox("Use BFS for Graph (Uncheck for DFS)", value=True)
-top_k_final = st.sidebar.slider("Final Top-K (After Reranking)", 1, 10, 5)
-
-# --- Helper function for PyVis ---
-def generate_graph_html(chunks_with_scores, graph: nx.Graph):
-    """Generates a PyVis HTML visualization of the retrieved neighborhood."""
-    net = Network(height="400px", width="100%", bgcolor="#222222", font_color="white")
+# -----------------------------------------------------------------------------
+# 7. HELPER: query_all_docs()
+# -----------------------------------------------------------------------------
+def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: int = 1) -> dict:
+    shared = get_shared_models()
+    embedder = shared["embedder"]
+    reranker = shared["reranker"]
+    llm = shared["llm"]
     
-    # Add retrieved nodes
-    retrieved_ids = [c["chunk_id"] for c, _ in chunks_with_scores]
+    q_emb = embedder.generate_query_embedding(query)
     
-    # We want to pull a small subgraph for visualization
-    subgraph_nodes = set(retrieved_ids)
+    merged_candidates = []
     
-    # Add 1-hop neighbors for visual context
-    for node_id in retrieved_ids:
-        if node_id in graph:
-            subgraph_nodes.update(graph.neighbors(node_id))
-            
-    subgraph = graph.subgraph(subgraph_nodes)
-    
-    for node in subgraph.nodes:
-        # Color retrieved nodes red, others blue
-        color = "#ff4b4b" if node in retrieved_ids else "#1f77b4"
-        title = subgraph.nodes[node].get("text", "Unknown text")[:100] + "..."
-        net.add_node(node, label=node[:8], title=title, color=color)
+    for doc_name in doc_names:
+        sys = get_doc_system(doc_name)
         
-    for u, v in subgraph.edges:
-        net.add_edge(u, v)
-        
-    html = net.generate_html()
-    return html
-
-# --- Main Interface ---
-query = st.text_input("Ask a question based on your documents:", placeholder="e.g., What are the key features of the project?")
-
-if st.button("Search") and query:
-    if not os.getenv("GROQ_API_KEY"):
-        st.warning("OPENAI_API_KEY is not set. Generating answer will fail.")
-        
-    with st.spinner("Executing Hybrid Retrieval Pipeline..."):
         # 1. Lexical Search
-        bm25_res = systems["bm25"].bm25_search(query, top_k=top_k_initial)
+        bm25_res = sys["bm25"].bm25_search(query, top_k=20)
         
         # 2. Vector Search
-        q_emb = systems["embedder"].generate_query_embedding(query)
-        vec_res = systems["vs"].vector_search(q_emb, top_k=top_k_initial)
+        vec_res = sys["vs"].vector_search(q_emb, top_k=20)
         
         # 3. Graph Expansion
         graph_res = []
         if graph_depth > 0:
-            seeds = [res[0] for res in vec_res[:3]] # Use top 3 vector hits as seeds
-            graph_res = systems["gr"].graph_based_retrieval(seeds, max_depth=graph_depth, use_bfs=use_bfs)
+            seeds = [res[0] for res in vec_res[:3]]
+            graph_res = sys["gr"].graph_based_retrieval(seeds, max_depth=graph_depth, use_bfs=True)
             
         # 4. Fusion
-        fused_res = systems["fusion"].fuse_results(bm25_res, vec_res, graph_res, top_k=20)
+        fused_res = sys["fusion"].fuse_results(bm25_res, vec_res, graph_res, top_k=20)
+        merged_candidates.extend(fused_res)
         
-        # 5. Reranking
-        final_res = systems["reranker"].rerank(query, fused_res, top_k=top_k_final)
-        
-        # 6. LLM Generation
-        answer = systems["llm"].generate_answer(query, final_res)
-        
-    st.subheader("🤖 Generated Answer")
-    st.write(answer)
+    # Sort merged candidates by initial fusion score to keep top pool
+    merged_candidates.sort(key=lambda x: x[1], reverse=True)
+    # Take top 50 across all docs for reranking to save time
+    merged_candidates = merged_candidates[:50]
     
-    col1, col2 = st.columns(2)
+    # 5. Reranking
+    final_res = reranker.rerank(query, merged_candidates, top_k=top_k)
     
-    with col1:
-        st.subheader("📄 Retrieved Context (Top Chunks)")
-        for i, (chunk, score) in enumerate(final_res):
-            with st.expander(f"[{i+1}] Source: {chunk.get('source_filename')} (Page {chunk.get('page_number')}) | Score: {score:.4f}"):
-                st.write(chunk.get("text"))
-                
-    with col2:
-        st.subheader("🕸️ Local Graph Neighborhood")
-        if final_res and systems["gb"].graph:
+    # 6. LLM Generation
+    answer = llm.generate_answer(query, final_res)
+
+    sources = []
+    for chunk, score in final_res:
+        sources.append({
+            "filename": chunk.get("source_filename", "Unknown"),
+            "page": chunk.get("page_number", 0),
+            "score": score,
+            "text": chunk.get("text", "")
+        })
+
+    return {
+        "answer": answer,
+        "sources": sources
+    }
+
+
+# -----------------------------------------------------------------------------
+# 8. HELPER: delete_doc()
+# -----------------------------------------------------------------------------
+def delete_doc(doc_name: str):
+    shutil.rmtree(f"doc_store/{doc_name}", ignore_errors=True)
+    st.session_state.uploaded_docs = [d for d in st.session_state.uploaded_docs if d != doc_name]
+    get_doc_system.clear()
+    st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# 9. SESSION STATE INITIALIZATION
+# -----------------------------------------------------------------------------
+if "uploaded_docs" not in st.session_state:
+    st.session_state.uploaded_docs = get_existing_docs()
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+
+# -----------------------------------------------------------------------------
+# 10. SIDEBAR UI
+# -----------------------------------------------------------------------------
+st.sidebar.title("GraphRAG")
+st.sidebar.caption("Zero hallucination document Q&A")
+
+st.sidebar.markdown("── Your Documents ──")
+
+for doc_name in list(st.session_state.uploaded_docs):
+    meta_path = f"doc_store/{doc_name}/meta.json"
+    if os.path.exists(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        col1, col2 = st.sidebar.columns([4, 1])
+        col1.markdown(f"📄 **{meta['filename']}**")
+        col1.caption(f"{meta.get('chunk_count', 0)} chunks · {meta.get('page_count', 0)} pages")
+        if col2.button("🗑", key=f"del_{doc_name}"):
+            delete_doc(doc_name)
+    else:
+        # cleanup missing
+        st.session_state.uploaded_docs.remove(doc_name)
+
+st.sidebar.markdown("── ── ── ── ── ──")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload a PDF",
+    type=["pdf"],
+    label_visibility="collapsed"
+)
+
+if uploaded_file:
+    already_uploaded = [
+        json.load(open(f"doc_store/{d}/meta.json"))["filename"]
+        for d in st.session_state.uploaded_docs
+        if os.path.exists(f"doc_store/{d}/meta.json")
+    ]
+    if uploaded_file.name not in already_uploaded:
+        with st.sidebar.status("Processing PDF...", expanded=True) as status:
+            st.write("Extracting text...")
+            st.write("Building indexes...")
+            st.write("Building knowledge graph...")
             try:
-                graph_html = generate_graph_html(final_res, systems["gb"].graph)
-                components.html(graph_html, height=410)
+                meta = ingest_pdf(uploaded_file)
+                st.session_state.uploaded_docs.append(meta["doc_name"])
+                status.update(label="✅ Ready!", state="complete")
+                st.rerun()
             except Exception as e:
-                st.error(f"Failed to generate graph visualization: {e}")
-        else:
-            st.info("Graph visualization not available.")
+                status.update(label=f"❌ Failed: {e}", state="error")
+                st.error(f"Failed to process PDF: {e}")
+
+st.sidebar.markdown("── Settings ──")
+with st.sidebar.expander("⚙️ Settings"):
+    top_k = st.slider("Results per document", 3, 20, 5)
+    graph_depth = st.slider("Graph depth", 0, 3, 1)
+
+
+# -----------------------------------------------------------------------------
+# 11. MAIN AREA UI
+# -----------------------------------------------------------------------------
+if not os.getenv("GROQ_API_KEY"):
+    st.warning("⚠️ GROQ_API_KEY not set in .env file or environment variables. Answers will fail.")
+
+if not st.session_state.uploaded_docs:
+    st.title("GraphRAG")
+    st.markdown("### Upload a PDF to get started")
+    st.markdown("Your documents are processed locally. "
+                "Answers are grounded in your documents only — no hallucinations.")
+    st.info("👈 Upload a PDF using the sidebar to begin")
+    st.stop()
+
+# Chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+        if msg["role"] == "assistant" and msg.get("sources"):
+            with st.expander(f"📚 Sources ({len(msg['sources'])} chunks)"):
+                for src in msg["sources"]:
+                    st.markdown(
+                        f"**{src['filename']}** · Page {src['page']} · "
+                        f"Score: {src['score']:.2f}"
+                    )
+                    st.caption(src["text"][:300] + "...")
+                    st.divider()
+
+if prompt := st.chat_input(
+    "Ask anything about your documents...",
+    disabled=len(st.session_state.uploaded_docs) == 0
+):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.write(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Searching your documents..."):
+            try:
+                result = query_all_docs(
+                    prompt,
+                    st.session_state.uploaded_docs,
+                    top_k=top_k,
+                    graph_depth=graph_depth
+                )
+                st.write(result["answer"])
+                if result["sources"]:
+                    with st.expander(f"📚 Sources ({len(result['sources'])} chunks)"):
+                        for src in result["sources"]:
+                            st.markdown(
+                                f"**{src['filename']}** · Page {src['page']} · "
+                                f"Score: {src['score']:.2f}"
+                            )
+                            st.caption(src["text"][:300] + "...")
+                            st.divider()
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result["answer"],
+                    "sources": result["sources"]
+                })
+            except Exception as e:
+                st.error(f"Query failed: {e}")
