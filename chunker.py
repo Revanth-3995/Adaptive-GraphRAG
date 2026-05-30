@@ -3,7 +3,45 @@ import re
 import json
 import uuid
 import os
+from dotenv import load_dotenv
+load_dotenv()
+tesseract_path = os.getenv("TESSERACT_PATH")
+if tesseract_path:
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
 from typing import List, Dict, Any
+
+# OCR support — only imported if needed
+def _ocr_page(page) -> str:
+    """
+    Fallback: render the page as an image and run Tesseract OCR on it.
+    Only called when pymupdf returns no text (i.e. the page is image-based).
+    
+    Requires: pip install pytesseract pdf2image
+    System:   sudo apt install tesseract-ocr poppler-utils  (Linux)
+              brew install tesseract poppler              (Mac)
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+        import io
+
+        # Render page at 2x resolution for better OCR accuracy
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+        img = Image.open(io.BytesIO(img_bytes))
+        text = pytesseract.image_to_string(img)
+        return text
+    except ImportError:
+        print("      ⚠ OCR skipped — install pytesseract & Pillow for image-based PDF support:")
+        print("        pip install pytesseract Pillow")
+        print("        sudo apt install tesseract-ocr   (Linux)")
+        print("        brew install tesseract           (Mac)")
+        return ""
+    except Exception as e:
+        print(f"      ⚠ OCR failed on page: {e}")
+        return ""
 
 class DocumentChunker:
     """
@@ -92,15 +130,30 @@ class DocumentChunker:
         except Exception as e:
             raise RuntimeError(f"Failed to open PDF {file_path}: {e}")
             
+        total_pages = len(doc)
+        ocr_pages = 0
         all_chunks = []
         for page_num, page in enumerate(doc, start=1):
             raw_text = page.get_text("text")
+
             if not raw_text.strip():
-                continue # Skip empty pages
-                
+                # Page has no digital text — likely scanned or image-based
+                # Fall back to OCR instead of skipping
+                print(f"      → Page {page_num}/{total_pages}: no text layer, running OCR...")
+                raw_text = _ocr_page(page)
+                if raw_text.strip():
+                    ocr_pages += 1
+
+            if not raw_text.strip():
+                print(f"      → Page {page_num}/{total_pages}: skipped (blank or unreadable)")
+                continue
+
             clean_text = self._clean_text(raw_text)
             page_chunks = self._split_into_chunks(clean_text, page_num, filename)
             all_chunks.extend(page_chunks)
+
+        if ocr_pages > 0:
+            print(f"      ✓ OCR extracted text from {ocr_pages} image-based page(s)")
             
         self.chunks.extend(all_chunks)
         return all_chunks

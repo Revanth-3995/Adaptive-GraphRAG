@@ -27,7 +27,7 @@ def load_system():
     
     # 1. Load Data
     try:
-        with open("graph/chunk_store.json", "r") as f:
+        with open("graph/chunk_store.json", "r", encoding="utf-8") as f:
             chunks = json.load(f)
         embeddings = np.load("embeddings/embeddings.npy")
     except Exception as e:

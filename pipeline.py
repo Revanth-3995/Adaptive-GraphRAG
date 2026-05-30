@@ -85,7 +85,7 @@ class RetrievalPipeline:
         
         # Load data
         try:
-            with open("graph/chunk_store.json", "r") as f:
+            with open("graph/chunk_store.json", "r", encoding="utf-8") as f:
                 self.chunks = json.load(f)
             self.embeddings = np.load("embeddings/embeddings.npy")
         except Exception as e:
