@@ -2,11 +2,11 @@ import json
 import numpy as np
 from embedder import Embedder
 from graph_builder import GraphBuilder
-from bm25_index import BM25Retriever
-from vector_search import VectorSearch
-from graph_retriever import GraphRetriever
-from fusion import ResultFusion
-from reranker import Reranker
+from retrieval.bm25_index import BM25Retriever
+from retrieval.vector_search import VectorSearch
+from retrieval.graph_retriever import GraphRetriever
+from retrieval.fusion import ResultFusion
+from retrieval.reranker import Reranker
 
 def run_phase2_test():
     print("=== Starting Phase 2 Integration Test ===")
