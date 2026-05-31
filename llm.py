@@ -41,29 +41,52 @@ class LLMGenerator:
             
         return "\n".join(context_parts)
 
-    def generate_answer(self, query: str, retrieved_chunks: List[Tuple[Dict[str, Any], float]]) -> str:
+    def generate_answer(
+        self,
+        query: str,
+        retrieved_chunks: List[Tuple[Dict[str, Any], float]],
+        chat_history: List[Dict[str, str]] = None
+    ) -> str:
         """
         Sends the prompt to the LLM and streams or returns the response.
         """
         context = self.build_context(retrieved_chunks)
         
-        system_prompt = """You are an expert Q&A system. Your task is to answer the user's question based ONLY on the provided Context.
-        
-Rules:
-1. If the answer is not contained in the Context, say "I cannot answer this based on the provided documents."
-2. Do not use outside knowledge.
-3. If possible, briefly cite the source number (e.g., [Source 1]) when stating a fact."""
+        system_prompt = """You are a precise Q&A assistant. Answer ONLY from the provided Context.
 
+STRICT RULES:
+- Only use information from the Context. If not found, say "I cannot answer this based on the provided documents."
+- Cite sources inline like [Source 1].
+- NEVER repeat a sentence, phrase, or conclusion you have already written.
+- NEVER write filler like "In conclusion", "Overall", "In summary" more than once.
+- NEVER pad the answer. Each sentence must add NEW information.
+- If the user asks for a specific length, cover MORE topics and details — never repeat points.
+- If the user asks a follow-up question, use the conversation history to understand what they are referring to.
+- Stop writing the moment you have no new information to add."""
+
+        # Build messages list
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Add last 4 messages from history (2 exchanges) for context
+        # Skip the system message, only include user/assistant turns
+        if chat_history:
+            recent = chat_history[-4:]  # last 4 messages = 2 Q&A pairs
+            for msg in recent:
+                if msg["role"] in ("user", "assistant"):
+                    # For assistant messages, strip sources metadata, just keep content
+                    content = msg.get("content", "")
+                    messages.append({"role": msg["role"], "content": content})
+
+        # Add current question with context
         user_prompt = f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+        messages.append({"role": "user", "content": user_prompt})
         
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.0 # Keep it deterministic for factual Q&A
+                messages=messages,
+                temperature=0.1,
+                max_tokens=1500
             )
             return response.choices[0].message.content
             
