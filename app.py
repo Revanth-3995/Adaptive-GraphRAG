@@ -46,6 +46,72 @@ def get_existing_docs() -> list:
 # -----------------------------------------------------------------------------
 # 4. HELPER: ingest_pdf(uploaded_file)
 # -----------------------------------------------------------------------------
+def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
+    """Same as ingest_pdf but updates a progress bar at each step."""
+    filename = uploaded_file.name
+    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', filename.replace(".pdf", "")).lower()
+    doc_path = f"doc_store/{doc_name}"
+    os.makedirs(doc_path, exist_ok=True)
+
+    try:
+        # Step 1 — Save PDF
+        source_path = f"{doc_path}/source.pdf"
+        with open(source_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+
+        # Step 2 — Chunk
+        status_text.text("📄 Step 2/5: Chunking document...")
+        progress_bar.progress(20, text="Chunking document...")
+        chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
+        chunks = chunker.process_pdf(source_path)
+        with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
+            json.dump(chunks, f, ensure_ascii=False)
+
+        # Step 3 — Embed
+        status_text.text("🔢 Step 3/5: Generating embeddings...")
+        progress_bar.progress(45, text="Generating embeddings...")
+        embedder = get_shared_models()["embedder"]
+        embeddings = embedder.generate_embeddings(chunks)
+        np.save(f"{doc_path}/embeddings.npy", embeddings)
+
+        # Step 4 — FAISS + BM25
+        status_text.text("🔍 Step 4/5: Building search indexes...")
+        progress_bar.progress(65, text="Building search indexes...")
+        vs = VectorSearch()
+        vs.build_faiss_index(chunks, embeddings)
+        vs.save_index(
+            index_path=f"{doc_path}/faiss.index",
+            chunks_path=f"{doc_path}/faiss_chunks.pkl"
+        )
+        bm25 = BM25Retriever()
+        bm25.build_bm25_index(chunks)
+        bm25.save_index(output_path=f"{doc_path}/bm25_index.pkl")
+
+        # Step 5 — Knowledge graph
+        status_text.text("🕸️ Step 5/5: Building knowledge graph...")
+        progress_bar.progress(85, text="Building knowledge graph...")
+        gb = GraphBuilder()
+        gb.build_graph(chunks, embeddings)
+        gb.save_graph(output_path=f"{doc_path}/graph.pkl")
+
+        # Write meta
+        meta = {
+            "filename": filename,
+            "doc_name": doc_name,
+            "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "page_count": len(set([c.get("page_number", 0) for c in chunks])),
+            "chunk_count": len(chunks),
+            "status": "ready"
+        }
+        with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+        return meta
+
+    except Exception as e:
+        shutil.rmtree(doc_path, ignore_errors=True)
+        raise e
+
 def ingest_pdf(uploaded_file) -> dict:
     """
     Runs the full ingestion pipeline on an uploaded PDF.
@@ -116,6 +182,9 @@ def ingest_pdf(uploaded_file) -> dict:
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def get_shared_models() -> dict:
+    # Set the key in environment so Groq() client picks it up
+    if st.session_state.get("groq_api_key"):
+        os.environ["GROQ_API_KEY"] = st.session_state.groq_api_key
     return {
         "embedder": Embedder(),
         "llm": LLMGenerator(),
@@ -129,10 +198,10 @@ def get_shared_models() -> dict:
 def load_doc_systems(doc_name: str) -> dict:
     """Loads all indexes for a single document into memory."""
     doc_path = f"doc_store/{doc_name}"
-    
+
     with open(f"{doc_path}/chunks.json", "r", encoding="utf-8") as f:
         chunks = json.load(f)
-        
+
     embeddings = np.load(f"{doc_path}/embeddings.npy")
 
     bm25 = BM25Retriever()
@@ -165,7 +234,26 @@ def get_doc_system(doc_name: str) -> dict:
 # -----------------------------------------------------------------------------
 # 7. HELPER: query_all_docs()
 # -----------------------------------------------------------------------------
-def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: int = 1) -> dict:
+def compute_confidence(reranked_results: list) -> tuple:
+    """
+    Returns (label, color_emoji) based on top chunk scores.
+    Reranker scores are typically in range -10 to +10.
+    """
+    if not reranked_results:
+        return "Low", "🔴"
+
+    # Take average of top 3 scores
+    top_scores = [score for _, score in reranked_results[:3]]
+    avg_score = sum(top_scores) / len(top_scores)
+
+    if avg_score >= 2.0:
+        return "High", "🟢"
+    elif avg_score >= 0.0:
+        return "Medium", "🟡"
+    else:
+        return "Low", "🔴"
+
+def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: int = 1, chat_history: list = None) -> dict:
     shared = get_shared_models()
     embedder = shared["embedder"]
     reranker = shared["reranker"]
@@ -174,7 +262,7 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     q_emb = embedder.generate_query_embedding(query)
     
     merged_candidates = []
-    
+
     for doc_name in doc_names:
         sys = get_doc_system(doc_name)
         
@@ -203,7 +291,7 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     final_res = reranker.rerank(query, merged_candidates, top_k=top_k)
     
     # 6. LLM Generation
-    answer = llm.generate_answer(query, final_res)
+    answer = llm.generate_answer(query, final_res, chat_history=chat_history)
 
     sources = []
     for chunk, score in final_res:
@@ -214,9 +302,13 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
             "text": chunk.get("text", "")
         })
 
+    confidence_label, confidence_emoji = compute_confidence(final_res)
+
     return {
         "answer": answer,
-        "sources": sources
+        "sources": sources,
+        "confidence": confidence_label,
+        "confidence_emoji": confidence_emoji
     }
 
 
@@ -239,12 +331,34 @@ if "uploaded_docs" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "groq_api_key" not in st.session_state:
+    st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
+
 
 # -----------------------------------------------------------------------------
 # 10. SIDEBAR UI
 # -----------------------------------------------------------------------------
 st.sidebar.title("GraphRAG")
 st.sidebar.caption("Zero hallucination document Q&A")
+
+st.sidebar.markdown("── API Key ──")
+api_key_input = st.sidebar.text_input(
+    "Groq API Key",
+    value=st.session_state.groq_api_key,
+    type="password",
+    placeholder="gsk_...",
+    help="Get a free key at console.groq.com"
+)
+if api_key_input != st.session_state.groq_api_key:
+    st.session_state.groq_api_key = api_key_input
+    # Clear cached models so they reload with the new key
+    get_shared_models.clear()
+    st.rerun()
+
+if not st.session_state.groq_api_key:
+    st.sidebar.warning("⚠️ Enter your Groq API key to enable answers")
+else:
+    st.sidebar.success("✓ API key set")
 
 st.sidebar.markdown("── Your Documents ──")
 
@@ -264,6 +378,17 @@ for doc_name in list(st.session_state.uploaded_docs):
 
 st.sidebar.markdown("── ── ── ── ── ──")
 
+col1, col2 = st.sidebar.columns(2)
+if col1.button("🗑 Clear Chat", use_container_width=True):
+    st.session_state.messages = []
+    st.rerun()
+
+if col2.button("↺ Reload Docs", use_container_width=True,
+               help="Rescan doc_store for new documents"):
+    st.session_state.uploaded_docs = get_existing_docs()
+    get_doc_system.clear()
+    st.rerun()
+
 uploaded_file = st.sidebar.file_uploader(
     "Upload a PDF",
     type=["pdf"],
@@ -271,24 +396,38 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 if uploaded_file:
-    already_uploaded = [
-        json.load(open(f"doc_store/{d}/meta.json"))["filename"]
-        for d in st.session_state.uploaded_docs
-        if os.path.exists(f"doc_store/{d}/meta.json")
-    ]
-    if uploaded_file.name not in already_uploaded:
-        with st.sidebar.status("Processing PDF...", expanded=True) as status:
-            st.write("Extracting text...")
-            st.write("Building indexes...")
-            st.write("Building knowledge graph...")
+    already_uploaded_names = []
+    for d in st.session_state.uploaded_docs:
+        meta_path = f"doc_store/{d}/meta.json"
+        if os.path.exists(meta_path):
             try:
-                meta = ingest_pdf(uploaded_file)
-                st.session_state.uploaded_docs.append(meta["doc_name"])
-                status.update(label="✅ Ready!", state="complete")
-                st.rerun()
-            except Exception as e:
-                status.update(label=f"❌ Failed: {e}", state="error")
-                st.error(f"Failed to process PDF: {e}")
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    already_uploaded_names.append(json.load(f)["filename"])
+            except:
+                pass
+
+    if uploaded_file.name not in already_uploaded_names:
+        progress_bar = st.sidebar.progress(0, text="Starting...")
+        status_text = st.sidebar.empty()
+
+        try:
+            # Step 1: Save and chunk
+            status_text.text("📄 Step 1/5: Extracting text...")
+            progress_bar.progress(10, text="Extracting text...")
+            meta = ingest_pdf_with_progress(
+                uploaded_file, progress_bar, status_text
+            )
+            st.session_state.uploaded_docs.append(meta["doc_name"])
+            progress_bar.progress(100, text="✅ Done!")
+            status_text.text(f"✅ {uploaded_file.name} ready!")
+            import time; time.sleep(1)
+            progress_bar.empty()
+            status_text.empty()
+            st.rerun()
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.sidebar.error(f"❌ Failed: {e}")
 
 st.sidebar.markdown("── Settings ──")
 with st.sidebar.expander("⚙️ Settings"):
@@ -299,8 +438,8 @@ with st.sidebar.expander("⚙️ Settings"):
 # -----------------------------------------------------------------------------
 # 11. MAIN AREA UI
 # -----------------------------------------------------------------------------
-if not os.getenv("GROQ_API_KEY"):
-    st.warning("⚠️ GROQ_API_KEY not set in .env file or environment variables. Answers will fail.")
+if not st.session_state.get("groq_api_key"):
+    st.warning("⚠️ Enter your Groq API key in the sidebar to enable answers.")
 
 if not st.session_state.uploaded_docs:
     st.title("GraphRAG")
@@ -314,19 +453,24 @@ if not st.session_state.uploaded_docs:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        if msg["role"] == "assistant" and msg.get("sources"):
-            with st.expander(f"📚 Sources ({len(msg['sources'])} chunks)"):
-                for src in msg["sources"]:
-                    st.markdown(
-                        f"**{src['filename']}** · Page {src['page']} · "
-                        f"Score: {src['score']:.2f}"
-                    )
-                    st.caption(src["text"][:300] + "...")
-                    st.divider()
+        if msg["role"] == "assistant":
+            if msg.get("confidence"):
+                st.caption(
+                    f"{msg['confidence_emoji']} **Confidence: {msg['confidence']}**"
+                )
+            if msg.get("sources"):
+                with st.expander(f"📚 Sources ({len(msg['sources'])} chunks)"):
+                    for src in msg["sources"]:
+                        st.markdown(
+                            f"**{src['filename']}** · Page {src['page']} · "
+                            f"Score: {src['score']:.2f}"
+                        )
+                        st.caption(src["text"][:300] + "...")
+                        st.divider()
 
 if prompt := st.chat_input(
     "Ask anything about your documents...",
-    disabled=len(st.session_state.uploaded_docs) == 0
+    disabled=len(st.session_state.uploaded_docs) == 0 or not st.session_state.get("groq_api_key")
 ):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -339,9 +483,16 @@ if prompt := st.chat_input(
                     prompt,
                     st.session_state.uploaded_docs,
                     top_k=top_k,
-                    graph_depth=graph_depth
+                    graph_depth=graph_depth,
+                    chat_history=st.session_state.messages
                 )
                 st.write(result["answer"])
+
+                # Confidence badge
+                confidence = result.get("confidence", "Medium")
+                emoji = result.get("confidence_emoji", "🟡")
+                st.caption(f"{emoji} **Confidence: {confidence}** — based on document relevance scores")
+
                 if result["sources"]:
                     with st.expander(f"📚 Sources ({len(result['sources'])} chunks)"):
                         for src in result["sources"]:
@@ -354,7 +505,9 @@ if prompt := st.chat_input(
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": result["answer"],
-                    "sources": result["sources"]
+                    "sources": result["sources"],
+                    "confidence": result.get("confidence", "Medium"),
+                    "confidence_emoji": result.get("confidence_emoji", "🟡")
                 })
             except Exception as e:
                 st.error(f"Query failed: {e}")

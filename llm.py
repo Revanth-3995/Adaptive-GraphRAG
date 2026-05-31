@@ -56,7 +56,7 @@ class LLMGenerator:
 
 STRICT RULES:
 - Only use information from the Context. If not found, say "I cannot answer this based on the provided documents."
-- Cite sources inline like [Source 1].
+- Cite sources inline using the source filename and page number like [filename.pdf, Page X].
 - NEVER repeat a sentence, phrase, or conclusion you have already written.
 - NEVER write filler like "In conclusion", "Overall", "In summary" more than once.
 - NEVER pad the answer. Each sentence must add NEW information.
