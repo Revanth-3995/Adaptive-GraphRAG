@@ -64,6 +64,8 @@ def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
         progress_bar.progress(20, text="Chunking document...")
         chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
         chunks = chunker.process_pdf(source_path)
+        for chunk in chunks:
+            chunk["source_filename"] = filename
         with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
             json.dump(chunks, f, ensure_ascii=False)
 
@@ -94,7 +96,6 @@ def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
         gb.build_graph(chunks, embeddings)
         gb.save_graph(output_path=f"{doc_path}/graph.pkl")
 
-        # Write meta
         meta = {
             "filename": filename,
             "doc_name": doc_name,
@@ -112,54 +113,41 @@ def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
         shutil.rmtree(doc_path, ignore_errors=True)
         raise e
 
+
 def ingest_pdf(uploaded_file) -> dict:
-    """
-    Runs the full ingestion pipeline on an uploaded PDF.
-    Saves all indexes to doc_store/<doc_name>/.
-    Returns a metadata dict on success.
-    Raises an exception on failure.
-    """
     filename = uploaded_file.name
-    # 1. Derive doc_name
     doc_name = re.sub(r'[^a-zA-Z0-9]', '_', filename.replace(".pdf", "")).lower()
     doc_path = f"doc_store/{doc_name}"
-
-    # 2. Create directory
     os.makedirs(doc_path, exist_ok=True)
-    
+
     try:
-        # 3. Save uploaded bytes
         source_path = f"{doc_path}/source.pdf"
         with open(source_path, "wb") as f:
             f.write(uploaded_file.getvalue())
 
-        # 4. Run chunker
         chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
         chunks = chunker.process_pdf(source_path)
+        for chunk in chunks:
+            chunk["source_filename"] = filename
         with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
             json.dump(chunks, f, ensure_ascii=False)
 
-        # 5. Run embedder
         embedder = get_shared_models()["embedder"]
         embeddings = embedder.generate_embeddings(chunks)
         np.save(f"{doc_path}/embeddings.npy", embeddings)
-        
-        # 6. Build FAISS index
+
         vs = VectorSearch()
         vs.build_faiss_index(chunks, embeddings)
         vs.save_index(index_path=f"{doc_path}/faiss.index", chunks_path=f"{doc_path}/faiss_chunks.pkl")
 
-        # 7. Build BM25 index
         bm25 = BM25Retriever()
         bm25.build_bm25_index(chunks)
         bm25.save_index(output_path=f"{doc_path}/bm25_index.pkl")
 
-        # 8. Build knowledge graph
         gb = GraphBuilder()
         gb.build_graph(chunks, embeddings)
         gb.save_graph(output_path=f"{doc_path}/graph.pkl")
 
-        # 9. Write meta.json
         meta = {
             "filename": filename,
             "doc_name": doc_name,
@@ -182,7 +170,6 @@ def ingest_pdf(uploaded_file) -> dict:
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def get_shared_models() -> dict:
-    # Set the key in environment so Groq() client picks it up
     if st.session_state.get("groq_api_key"):
         os.environ["GROQ_API_KEY"] = st.session_state.groq_api_key
     return {
@@ -196,7 +183,6 @@ def get_shared_models() -> dict:
 # 6. CACHED LOADER: get_doc_system(doc_name)
 # -----------------------------------------------------------------------------
 def load_doc_systems(doc_name: str) -> dict:
-    """Loads all indexes for a single document into memory."""
     doc_path = f"doc_store/{doc_name}"
 
     with open(f"{doc_path}/chunks.json", "r", encoding="utf-8") as f:
@@ -215,7 +201,7 @@ def load_doc_systems(doc_name: str) -> dict:
 
     gr = GraphRetriever(gb)
     fusion = ResultFusion()
-    
+
     return {
         "chunks": chunks,
         "embeddings": embeddings,
@@ -226,72 +212,78 @@ def load_doc_systems(doc_name: str) -> dict:
         "fusion": fusion
     }
 
+
 @st.cache_resource
 def get_doc_system(doc_name: str) -> dict:
     return load_doc_systems(doc_name)
 
 
+def clean_answer_formatting(text: str) -> str:
+    """Convert • bullet characters to markdown - bullets Streamlit can render."""
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        # If line starts with • (with optional leading spaces), convert to -
+        stripped = line.lstrip()
+        if stripped.startswith('•'):
+            indent = len(line) - len(stripped)
+            line = ' ' * indent + '- ' + stripped[1:].lstrip()
+        cleaned.append(line)
+    return '\n'.join(cleaned)
+
 # -----------------------------------------------------------------------------
-# 7. HELPER: query_all_docs()
+# 7. HELPER: parse_llm_response() + query_all_docs()
 # -----------------------------------------------------------------------------
-def compute_confidence(reranked_results: list) -> tuple:
-    """
-    Returns (label, color_emoji) based on top chunk scores.
-    Reranker scores are typically in range -10 to +10.
-    """
-    if not reranked_results:
-        return "Low", "🔴"
+def parse_llm_response(raw: str) -> tuple:
+    confidence_map = {
+        "HIGH":   ("High",   "🟢"),
+        "MEDIUM": ("Medium", "🟡"),
+        "LOW":    ("Low",    "🔴"),
+    }
+    label, emoji = "Medium", "🟡"
+    answer = raw.strip()
 
-    # Take average of top 3 scores
-    top_scores = [score for _, score in reranked_results[:3]]
-    avg_score = sum(top_scores) / len(top_scores)
+    for key, (l, e) in confidence_map.items():
+        tag = f"CONFIDENCE: {key}"
+        if tag in raw:
+            label, emoji = l, e
+            answer = raw.replace(tag, "").strip()
+            break
 
-    if avg_score >= 2.0:
-        return "High", "🟢"
-    elif avg_score >= 0.0:
-        return "Medium", "🟡"
-    else:
-        return "Low", "🔴"
+    answer = clean_answer_formatting(answer)  # ← only new line
+    return answer, label, emoji
 
-def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: int = 1, chat_history: list = None) -> dict:
+
+def query_all_docs(query: str, doc_names: list, top_k: int = 10,
+                   graph_depth: int = 1, chat_history: list = None) -> dict:
     shared = get_shared_models()
     embedder = shared["embedder"]
     reranker = shared["reranker"]
     llm = shared["llm"]
-    
+
     q_emb = embedder.generate_query_embedding(query)
-    
     merged_candidates = []
 
     for doc_name in doc_names:
         sys = get_doc_system(doc_name)
-        
-        # 1. Lexical Search
+
         bm25_res = sys["bm25"].bm25_search(query, top_k=20)
-        
-        # 2. Vector Search
         vec_res = sys["vs"].vector_search(q_emb, top_k=20)
-        
-        # 3. Graph Expansion
+
         graph_res = []
         if graph_depth > 0:
             seeds = [res[0] for res in vec_res[:3]]
             graph_res = sys["gr"].graph_based_retrieval(seeds, max_depth=graph_depth, use_bfs=True)
-            
-        # 4. Fusion
+
         fused_res = sys["fusion"].fuse_results(bm25_res, vec_res, graph_res, top_k=20)
         merged_candidates.extend(fused_res)
-        
-    # Sort merged candidates by initial fusion score to keep top pool
+
     merged_candidates.sort(key=lambda x: x[1], reverse=True)
-    # Take top 50 across all docs for reranking to save time
     merged_candidates = merged_candidates[:50]
-    
-    # 5. Reranking
+
     final_res = reranker.rerank(query, merged_candidates, top_k=top_k)
-    
-    # 6. LLM Generation
-    answer = llm.generate_answer(query, final_res, chat_history=chat_history)
+    raw_answer = llm.generate_answer(query, final_res, chat_history=chat_history)
+    answer, confidence_label, confidence_emoji = parse_llm_response(raw_answer)
 
     sources = []
     for chunk, score in final_res:
@@ -301,8 +293,6 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
             "score": score,
             "text": chunk.get("text", "")
         })
-
-    confidence_label, confidence_emoji = compute_confidence(final_res)
 
     return {
         "answer": answer,
@@ -351,7 +341,6 @@ api_key_input = st.sidebar.text_input(
 )
 if api_key_input != st.session_state.groq_api_key:
     st.session_state.groq_api_key = api_key_input
-    # Clear cached models so they reload with the new key
     get_shared_models.clear()
     st.rerun()
 
@@ -373,7 +362,6 @@ for doc_name in list(st.session_state.uploaded_docs):
         if col2.button("🗑", key=f"del_{doc_name}"):
             delete_doc(doc_name)
     else:
-        # cleanup missing
         st.session_state.uploaded_docs.remove(doc_name)
 
 st.sidebar.markdown("── ── ── ── ── ──")
@@ -411,12 +399,9 @@ if uploaded_file:
         status_text = st.sidebar.empty()
 
         try:
-            # Step 1: Save and chunk
             status_text.text("📄 Step 1/5: Extracting text...")
             progress_bar.progress(10, text="Extracting text...")
-            meta = ingest_pdf_with_progress(
-                uploaded_file, progress_bar, status_text
-            )
+            meta = ingest_pdf_with_progress(uploaded_file, progress_bar, status_text)
             st.session_state.uploaded_docs.append(meta["doc_name"])
             progress_bar.progress(100, text="✅ Done!")
             status_text.text(f"✅ {uploaded_file.name} ready!")
@@ -444,15 +429,17 @@ if not st.session_state.get("groq_api_key"):
 if not st.session_state.uploaded_docs:
     st.title("GraphRAG")
     st.markdown("### Upload a PDF to get started")
-    st.markdown("Your documents are processed locally. "
-                "Answers are grounded in your documents only — no hallucinations.")
+    st.markdown(
+        "Your documents are processed locally. "
+        "Answers are grounded in your documents only — no hallucinations."
+    )
     st.info("👈 Upload a PDF using the sidebar to begin")
     st.stop()
 
-# Chat history
+# Chat history replay
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+        st.markdown(msg["content"])          # ← markdown renders bullet points
         if msg["role"] == "assistant":
             if msg.get("confidence"):
                 st.caption(
@@ -465,16 +452,19 @@ for msg in st.session_state.messages:
                             f"**{src['filename']}** · Page {src['page']} · "
                             f"Score: {src['score']:.2f}"
                         )
-                        st.caption(src["text"][:300] + "...")
+                        st.markdown(f"*{src['text'][:300]}...*")
                         st.divider()
 
+# New message input
 if prompt := st.chat_input(
     "Ask anything about your documents...",
-    disabled=len(st.session_state.uploaded_docs) == 0 or not st.session_state.get("groq_api_key")
+    disabled=len(st.session_state.uploaded_docs) == 0
+             or not st.session_state.get("groq_api_key")
 ):
     st.session_state.messages.append({"role": "user", "content": prompt})
+
     with st.chat_message("user"):
-        st.write(prompt)
+        st.markdown(prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("Searching your documents..."):
@@ -486,12 +476,12 @@ if prompt := st.chat_input(
                     graph_depth=graph_depth,
                     chat_history=st.session_state.messages
                 )
-                st.write(result["answer"])
 
-                # Confidence badge
+                st.markdown(result["answer"])   # ← markdown renders bullet points
+
                 confidence = result.get("confidence", "Medium")
                 emoji = result.get("confidence_emoji", "🟡")
-                st.caption(f"{emoji} **Confidence: {confidence}** — based on document relevance scores")
+                st.caption(f"{emoji} **Confidence: {confidence}**")
 
                 if result["sources"]:
                     with st.expander(f"📚 Sources ({len(result['sources'])} chunks)"):
@@ -500,8 +490,9 @@ if prompt := st.chat_input(
                                 f"**{src['filename']}** · Page {src['page']} · "
                                 f"Score: {src['score']:.2f}"
                             )
-                            st.caption(src["text"][:300] + "...")
+                            st.markdown(f"*{src['text'][:300]}...*")
                             st.divider()
+
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": result["answer"],
@@ -509,5 +500,6 @@ if prompt := st.chat_input(
                     "confidence": result.get("confidence", "Medium"),
                     "confidence_emoji": result.get("confidence_emoji", "🟡")
                 })
+
             except Exception as e:
                 st.error(f"Query failed: {e}")
