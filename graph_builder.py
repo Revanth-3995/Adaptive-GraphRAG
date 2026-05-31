@@ -27,6 +27,18 @@ class GraphBuilder:
         self.max_edges_per_node = max_edges_per_node
         self.graph = nx.Graph()
         
+    def _page_proximity_bonus(self, page_a: int, page_b: int) -> float:
+        """
+        Returns a small bonus for chunks on nearby pages.
+        Same page = 0.1 bonus, adjacent page = 0.05 bonus, far = 0
+        """
+        diff = abs(page_a - page_b)
+        if diff == 0:
+            return 0.1
+        elif diff == 1:
+            return 0.05
+        return 0.0
+
     def _cosine_similarity(self, vec_a: np.ndarray, vec_b: np.ndarray) -> float:
         """
         Calculates the Cosine Similarity between two vectors.
@@ -71,9 +83,21 @@ class GraphBuilder:
             for j in range(len(chunks)):
                 if i == j:
                     continue
-                sim = self._cosine_similarity(embeddings[i], embeddings[j])
-                if sim >= self.similarity_threshold:
-                    similarities.append((j, sim))
+
+                base_sim = self._cosine_similarity(embeddings[i], embeddings[j])
+
+                # Add page proximity bonus for same-document chunks
+                if chunks[i].get("source_filename") == chunks[j].get("source_filename"):
+                    page_bonus = self._page_proximity_bonus(
+                        chunks[i].get("page_number", 0),
+                        chunks[j].get("page_number", 0)
+                    )
+                    adjusted_sim = base_sim + page_bonus
+                else:
+                    adjusted_sim = base_sim
+
+                if adjusted_sim >= self.similarity_threshold:
+                    similarities.append((j, adjusted_sim))
             
             # Sort by similarity descending, keep only top max_edges_per_node
             similarities.sort(key=lambda x: x[1], reverse=True)
