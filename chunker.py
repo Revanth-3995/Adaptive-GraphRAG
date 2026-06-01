@@ -64,56 +64,108 @@ class DocumentChunker:
         self.overlap = overlap_words
         self.chunks = []
         
+    def _extract_tables_from_page(self, page) -> str:
+        """
+        Extracts tables from a PDF page and formats them as markdown tables.
+        Uses PyMuPDF's built-in table detection.
+        Falls back gracefully if no tables found.
+        """
+        try:
+            tables = page.find_tables()
+            if not tables or not tables.tables:
+                return ""
+
+            markdown_tables = []
+            for table in tables.tables:
+                rows = table.extract()
+                if not rows or len(rows) < 2:
+                    continue
+
+                # Build markdown table
+                md_rows = []
+                header = rows[0]
+                # Clean None values
+                header = [str(cell).strip() if cell else "" for cell in header]
+                md_rows.append("| " + " | ".join(header) + " |")
+                md_rows.append("|" + "|".join(["---"] * len(header)) + "|")
+
+                for row in rows[1:]:
+                    row = [str(cell).strip() if cell else "" for cell in row]
+                    md_rows.append("| " + " | ".join(row) + " |")
+
+                markdown_tables.append('\n'.join(md_rows))
+
+            return '\n\n'.join(markdown_tables)
+        except Exception:
+            return ""
+
     def _clean_text(self, text: str) -> str:
         """
-        Cleans the extracted text by removing excessive whitespaces and newlines.
-        
-        Why Clean Text?
-        Raw PDF extraction often contains weird formatting, arbitrary line breaks, 
-        and multiple spaces. These artifacts can negatively impact the quality of 
-        the embeddings generated later.
+        Cleans text but PRESERVES paragraph breaks (double newlines) for semantic chunking.
+        Single newlines within a paragraph are collapsed to spaces.
+        Double newlines (paragraph boundaries) are preserved.
         """
-        text = text.replace('\n', ' ')
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
+        # Normalize line endings
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        # Preserve paragraph breaks
+        paragraphs = text.split('\n\n')
+        cleaned_paragraphs = []
+        for para in paragraphs:
+            # Within each paragraph, collapse single newlines to spaces
+            para = re.sub(r'\n', ' ', para)
+            para = re.sub(r'\s+', ' ', para)
+            para = para.strip()
+            if para:
+                cleaned_paragraphs.append(para)
+        return '\n\n'.join(cleaned_paragraphs)
+
+    def _make_chunk(self, text: str, page_number: int, source_filename: str) -> Dict[str, Any]:
+        """Helper to create a chunk dict with metadata."""
+        return {
+            "chunk_id": str(uuid.uuid4()),
+            "text": text,
+            "source_filename": source_filename,
+            "page_number": page_number
+        }
 
     def _split_into_chunks(self, text: str, page_number: int, source_filename: str) -> List[Dict[str, Any]]:
         """
-        Splits text into chunks of specified word count with overlap.
-        
-        Time Complexity: O(N) where N is the number of words.
-        Space Complexity: O(N) to store the chunks in memory.
+        Semantic chunking — splits at natural boundaries instead of fixed word count.
+        Priority order: paragraph breaks → heading breaks → sentence breaks → word count
         """
-        words = text.split()
-        page_chunks = []
-        
-        # We step through the words array. The step size is (chunk_size - overlap)
-        step_size = self.chunk_size - self.overlap
-        if step_size <= 0:
-            raise ValueError("Overlap must be strictly less than chunk_size")
-            
-        for i in range(0, len(words), step_size):
-            chunk_words = words[i:i + self.chunk_size]
-            if not chunk_words:
-                break
-                
-            chunk_text = ' '.join(chunk_words)
-            # Create a unique ID for each chunk for future retrieval and deduplication
-            chunk_id = str(uuid.uuid4())
-            
-            # Important: Check if chunk has substantial content (e.g., > 3 words)
-            if len(chunk_words) < 3:
-                continue
+        # Step 1: Split by double newlines (paragraph boundaries)
+        paragraphs = re.split(r'\n\s*\n', text)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
-            chunk_metadata = {
-                "chunk_id": chunk_id,
-                "text": chunk_text,
-                "source_filename": source_filename,
-                "page_number": page_number
-            }
-            page_chunks.append(chunk_metadata)
-            
-        return page_chunks
+        chunks = []
+        current_chunk_words = []
+        current_word_count = 0
+
+        for para in paragraphs:
+            para_words = para.split()
+            para_word_count = len(para_words)
+
+            # If adding this paragraph would exceed chunk_size
+            if current_word_count + para_word_count > self.chunk_size and current_chunk_words:
+                # Save current chunk with overlap
+                chunk_text = ' '.join(current_chunk_words)
+                if len(current_chunk_words) >= 3:
+                    chunks.append(self._make_chunk(chunk_text, page_number, source_filename))
+
+                # Start new chunk with overlap from end of previous
+                overlap_words = current_chunk_words[-self.overlap:] if self.overlap > 0 else []
+                current_chunk_words = overlap_words + para_words
+                current_word_count = len(current_chunk_words)
+            else:
+                current_chunk_words.extend(para_words)
+                current_word_count += para_word_count
+
+        # Don't forget the last chunk
+        if len(current_chunk_words) >= 3:
+            chunk_text = ' '.join(current_chunk_words)
+            chunks.append(self._make_chunk(chunk_text, page_number, source_filename))
+
+        return chunks
 
     def process_pdf(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -136,6 +188,9 @@ class DocumentChunker:
         for page_num, page in enumerate(doc, start=1):
             raw_text = page.get_text("text")
 
+            # Extract tables separately
+            table_text = self._extract_tables_from_page(page)
+
             if not raw_text.strip():
                 # Page has no digital text — likely scanned or image-based
                 # Fall back to OCR instead of skipping
@@ -144,11 +199,16 @@ class DocumentChunker:
                 if raw_text.strip():
                     ocr_pages += 1
 
-            if not raw_text.strip():
+            if not raw_text.strip() and not table_text:
                 print(f"      → Page {page_num}/{total_pages}: skipped (blank or unreadable)")
                 continue
 
-            clean_text = self._clean_text(raw_text)
+            # Combine regular text with table text
+            combined_text = raw_text
+            if table_text:
+                combined_text = raw_text + "\n\n" + table_text
+
+            clean_text = self._clean_text(combined_text)
             page_chunks = self._split_into_chunks(clean_text, page_num, filename)
             all_chunks.extend(page_chunks)
 

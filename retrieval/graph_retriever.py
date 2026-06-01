@@ -23,65 +23,134 @@ class GraphRetriever:
     def __init__(self, graph_builder: GraphBuilder):
         self.graph_builder = graph_builder
         
-    def graph_based_retrieval(self, seed_chunks: List[Dict[str, Any]], max_depth: int = 1, use_bfs: bool = True) -> List[Tuple[Dict[str, Any], float]]:
+    def graph_based_retrieval(
+        self,
+        seed_chunks: List[Dict[str, Any]],
+        max_depth: int = 1,
+        use_bfs: bool = True,
+        query_type: str = "SIMPLE"
+    ) -> List[Tuple[Dict[str, Any], float]]:
         """
-        Expands the retrieval context by traversing the graph from seed chunks.
-        
-        Note on Scoring:
-        Graph retrieved nodes aren't directly scored against the query. Instead, we 
-        score them based on their proximity/edge-weights to the seed nodes. For Phase 1/2 
-        baseline, we'll assign a diminishing score based on depth.
-        
-        Returns:
-            List of tuples: (chunk_dict, graph_score)
+        Expands the retrieval context by adaptively traversing the graph from seed chunks
+        based on the classified query type.
         """
         if not self.graph_builder.graph or self.graph_builder.graph.number_of_nodes() == 0:
             print("Warning: Graph is empty or not loaded.")
             return []
             
-        seed_ids = [chunk["chunk_id"] for chunk in seed_chunks]
+        seed_ids = [chunk["chunk_id"] for chunk in seed_chunks if chunk["chunk_id"] in self.graph_builder.graph]
+        if not seed_ids:
+            return []
+
         expanded_results = []
-        visited_ids = set(seed_ids) # We don't want to return the seeds themselves as "graph results"
-        
-        # We'll use BFS manually here so we can keep track of depth for scoring
-        from collections import deque
-        
-        for seed_id in seed_ids:
-            if seed_id not in self.graph_builder.graph:
-                continue
-                
-            queue = deque([(seed_id, 0)])
-            
-            while queue:
-                current_id, depth = queue.popleft()
-                
-                if depth > 0:
-                    if current_id not in visited_ids:
+        visited_ids = set(seed_ids)
+        import networkx as nx
+
+        # --- Adaptive Traversal Strategies ---
+        if query_type == "SIMPLE":
+            # BFS Depth 1
+            from collections import deque
+            for seed_id in seed_ids:
+                queue = deque([(seed_id, 0)])
+                while queue:
+                    current_id, depth = queue.popleft()
+                    if depth == 1 and current_id not in visited_ids:
                         visited_ids.add(current_id)
-                        # Get chunk metadata from the graph node
                         node_data = self.graph_builder.graph.nodes[current_id]
+                        chunk_dict = {"chunk_id": current_id, "text": node_data.get("text", ""), "source_filename": node_data.get("source", ""), "page_number": node_data.get("page", 0)}
+                        expanded_results.append((chunk_dict, 0.9))
+                    if depth < 1:
+                        for neighbor in self.graph_builder.graph.neighbors(current_id):
+                            if neighbor not in visited_ids:
+                                queue.append((neighbor, depth + 1))
+
+        elif query_type == "MODERATE":
+            # BFS Depth 2
+            from collections import deque
+            for seed_id in seed_ids:
+                queue = deque([(seed_id, 0)])
+                while queue:
+                    current_id, depth = queue.popleft()
+                    if depth > 0 and current_id not in visited_ids:
+                        visited_ids.add(current_id)
+                        node_data = self.graph_builder.graph.nodes[current_id]
+                        chunk_dict = {"chunk_id": current_id, "text": node_data.get("text", ""), "source_filename": node_data.get("source", ""), "page_number": node_data.get("page", 0)}
+                        expanded_results.append((chunk_dict, 0.9 ** depth))
+                    if depth < 2:
+                        for neighbor in self.graph_builder.graph.neighbors(current_id):
+                            if neighbor not in visited_ids:
+                                queue.append((neighbor, depth + 1))
+
+        elif query_type == "ALGORITHM":
+            # BFS Depth 2, prioritizing SECTION_EDGE and ENTITY_EDGE
+            from collections import deque
+            for seed_id in seed_ids:
+                queue = deque([(seed_id, 0)])
+                while queue:
+                    current_id, depth = queue.popleft()
+                    if depth > 0 and current_id not in visited_ids:
+                        visited_ids.add(current_id)
+                        node_data = self.graph_builder.graph.nodes[current_id]
+                        chunk_dict = {"chunk_id": current_id, "text": node_data.get("text", ""), "source_filename": node_data.get("source", ""), "page_number": node_data.get("page", 0)}
+                        # Base score on depth
+                        base_score = 0.9 ** depth
+                        # Boost score slightly if we reached this node via a preferred edge
+                        # Since BFS queue doesn't store edge path easily here, we just apply base score.
+                        # True prioritization happens implicitly by taking these edges.
+                        expanded_results.append((chunk_dict, base_score))
+                    if depth < 2:
+                        # Prioritize specific edges
+                        neighbors = []
+                        for neighbor in self.graph_builder.graph.neighbors(current_id):
+                            if neighbor not in visited_ids:
+                                edge_data = self.graph_builder.graph[current_id][neighbor]
+                                e_type = edge_data.get("edge_type", "SIMILARITY_EDGE")
+                                priority = 1 if e_type in ["SECTION_EDGE", "ENTITY_EDGE"] else 0
+                                neighbors.append((priority, neighbor))
                         
-                        # Reconstruct chunk dict
-                        chunk_dict = {
-                            "chunk_id": current_id,
-                            "text": node_data.get("text", ""),
-                            "source_filename": node_data.get("source", ""),
-                            "page_number": node_data.get("page", 0)
-                        }
-                        
-                        # Heuristic score: closer nodes get higher scores.
-                        # Depth 1: 0.9, Depth 2: 0.81, etc.
-                        graph_score = 0.9 ** depth
-                        expanded_results.append((chunk_dict, graph_score))
-                    else:
-                        # Already visited, skip adding its neighbors again
-                        continue
-                    
-                if depth < max_depth:
-                    for neighbor in self.graph_builder.graph.neighbors(current_id):
-                        if neighbor not in visited_ids:
+                        # Sort by priority descending
+                        neighbors.sort(key=lambda x: x[0], reverse=True)
+                        for _, neighbor in neighbors:
                             queue.append((neighbor, depth + 1))
-                            
+
+        elif query_type == "COMPLEX":
+            # Personalized PageRank
+            personalization = {node: (1.0 if node in seed_ids else 0.0) for node in self.graph_builder.graph.nodes}
+            try:
+                pr = nx.pagerank(self.graph_builder.graph, alpha=0.85, personalization=personalization, weight='weight')
+                # Sort and take top 10 non-seed nodes
+                sorted_pr = sorted(pr.items(), key=lambda x: x[1], reverse=True)
+                for node_id, score in sorted_pr:
+                    if node_id not in visited_ids and len(expanded_results) < 10:
+                        visited_ids.add(node_id)
+                        node_data = self.graph_builder.graph.nodes[node_id]
+                        chunk_dict = {"chunk_id": node_id, "text": node_data.get("text", ""), "source_filename": node_data.get("source", ""), "page_number": node_data.get("page", 0)}
+                        # PR scores are small, normalize up to ~0.9 range roughly
+                        expanded_results.append((chunk_dict, min(score * 10, 0.9)))
+            except Exception as e:
+                print(f"PageRank failed: {e}. Falling back to BFS.")
+                return self.graph_based_retrieval(seed_chunks, max_depth=2, use_bfs=True, query_type="MODERATE")
+
+        elif query_type == "RESEARCH":
+            # Random Walk + PageRank approximation (using standard PageRank with lower alpha for broader exploration)
+            personalization = {node: (1.0 if node in seed_ids else 0.0) for node in self.graph_builder.graph.nodes}
+            try:
+                pr = nx.pagerank(self.graph_builder.graph, alpha=0.70, personalization=personalization, weight='weight')
+                sorted_pr = sorted(pr.items(), key=lambda x: x[1], reverse=True)
+                for node_id, score in sorted_pr:
+                    if node_id not in visited_ids and len(expanded_results) < 15:
+                        visited_ids.add(node_id)
+                        node_data = self.graph_builder.graph.nodes[node_id]
+                        chunk_dict = {"chunk_id": node_id, "text": node_data.get("text", ""), "source_filename": node_data.get("source", ""), "page_number": node_data.get("page", 0)}
+                        expanded_results.append((chunk_dict, min(score * 15, 0.9)))
+            except Exception as e:
+                print(f"PageRank failed: {e}. Falling back to BFS.")
+                return self.graph_based_retrieval(seed_chunks, max_depth=2, use_bfs=True, query_type="MODERATE")
+
+        else:
+            # Fallback BFS depth 1
+            return self.graph_based_retrieval(seed_chunks, max_depth=1, use_bfs=True, query_type="SIMPLE")
+
         return expanded_results
 
 if __name__ == "__main__":

@@ -27,6 +27,18 @@ class GraphBuilder:
         self.max_edges_per_node = max_edges_per_node
         self.graph = nx.Graph()
         
+    def _page_proximity_bonus(self, page_a: int, page_b: int) -> float:
+        """
+        Returns a small bonus for chunks on nearby pages.
+        Same page = 0.1 bonus, adjacent page = 0.05 bonus, far = 0
+        """
+        diff = abs(page_a - page_b)
+        if diff == 0:
+            return 0.1
+        elif diff == 1:
+            return 0.05
+        return 0.0
+
     def _cosine_similarity(self, vec_a: np.ndarray, vec_b: np.ndarray) -> float:
         """
         Calculates the Cosine Similarity between two vectors.
@@ -46,13 +58,13 @@ class GraphBuilder:
 
     def build_graph(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray) -> nx.Graph:
         """
-        Builds the semantic graph by computing pairwise similarities.
-        
-        Time Complexity: O(N^2 * D) where N is number of chunks, D is embedding dimension.
-        *Optimization Note:* For large datasets, N^2 is too slow. In production, 
-        we'd use FAISS or Annoy to efficiently find nearest neighbors instead of exhaustive search.
+        Builds the semantic graph with multiple edge types:
+        1. SIMILARITY_EDGE (Cosine similarity)
+        2. PAGE_EDGE (Proximity on same/adjacent pages)
+        3. SECTION_EDGE (Approximated if chunks share similar contextual phrasing/headings)
+        4. ENTITY_EDGE (Approximated based on keyword overlap)
         """
-        print(f"Building graph for {len(chunks)} nodes...")
+        print(f"Building multi-edge graph for {len(chunks)} nodes...")
         
         # 1. Add all nodes
         for i, chunk in enumerate(chunks):
@@ -61,29 +73,71 @@ class GraphBuilder:
                 text=chunk["text"], 
                 source=chunk["source_filename"],
                 page=chunk["page_number"],
-                idx=i # Store the embedding index for reference
+                idx=i
             )
             
-        # 2. Add edges based on semantic similarity
-        # We iterate over all unique pairs (i, j) where i < j
+        # 2. Add edges
         for i in range(len(chunks)):
+            chunk_i = chunks[i]
+            node_i_id = chunk_i["chunk_id"]
+
             similarities = []
+
             for j in range(len(chunks)):
                 if i == j:
                     continue
-                sim = self._cosine_similarity(embeddings[i], embeddings[j])
-                if sim >= self.similarity_threshold:
-                    similarities.append((j, sim))
+
+                chunk_j = chunks[j]
+                node_j_id = chunk_j["chunk_id"]
+
+                # A. SIMILARITY_EDGE
+                base_sim = self._cosine_similarity(embeddings[i], embeddings[j])
+                if base_sim >= self.similarity_threshold:
+                    similarities.append((j, base_sim, "SIMILARITY_EDGE"))
+
+                # B. PAGE_EDGE / Proximity
+                if chunk_i.get("source_filename") == chunk_j.get("source_filename"):
+                    page_bonus = self._page_proximity_bonus(
+                        chunk_i.get("page_number", 0),
+                        chunk_j.get("page_number", 0)
+                    )
+                    if page_bonus > 0:
+                        self.graph.add_edge(node_i_id, node_j_id, weight=page_bonus, edge_type="PAGE_EDGE")
+
+                # C. SECTION_EDGE & ENTITY_EDGE (Approximation using text heuristics)
+                # If both chunks start with the exact same prefix (e.g. they both start discussing the same concept),
+                # we roughly simulate a section edge.
+                text_i = chunk_i.get("text", "").lower()
+                text_j = chunk_j.get("text", "").lower()
+
+                words_i = set(text_i.split()[:5])
+                words_j = set(text_j.split()[:5])
+                if words_i and words_i.intersection(words_j):
+                    self.graph.add_edge(node_i_id, node_j_id, weight=0.3, edge_type="SECTION_EDGE")
+
+                # Simple entity extraction approximation (overlap of rare/long words)
+                long_words_i = set(w for w in text_i.split() if len(w) > 8)
+                long_words_j = set(w for w in text_j.split() if len(w) > 8)
+                overlap = long_words_i.intersection(long_words_j)
+                if len(overlap) >= 2:
+                    self.graph.add_edge(node_i_id, node_j_id, weight=0.4 + (0.05 * len(overlap)), edge_type="ENTITY_EDGE")
             
-            # Sort by similarity descending, keep only top max_edges_per_node
+            # Add top-k SIMILARITY_EDGEs
             similarities.sort(key=lambda x: x[1], reverse=True)
             top_similar = similarities[:self.max_edges_per_node]
-            
-            node_i_id = chunks[i]["chunk_id"]
-            for j, sim in top_similar:
+            for j, sim, edge_type in top_similar:
                 node_j_id = chunks[j]["chunk_id"]
-                # nx.Graph is undirected, adding (u,v) is same as (v,u)
-                self.graph.add_edge(node_i_id, node_j_id, weight=sim)
+                # nx.Graph will merge edges between the same nodes or update attributes depending on usage,
+                # but we'll use add_edge to ensure a connection exists. NetworkX standard graphs only hold
+                # one edge between two nodes, so the last added overwrites. NetworkX MultiGraph supports multiple.
+                # To prevent overwriting strong similarity with a weaker edge later, we only add if no edge exists
+                # or if we are upgrading it.
+                if not self.graph.has_edge(node_i_id, node_j_id):
+                    self.graph.add_edge(node_i_id, node_j_id, weight=sim, edge_type=edge_type)
+                else:
+                    # Update if similarity weight is higher
+                    if self.graph[node_i_id][node_j_id].get("weight", 0) < sim:
+                        self.graph[node_i_id][node_j_id].update({"weight": sim, "edge_type": edge_type})
                 
         self.print_graph_stats()
         return self.graph
