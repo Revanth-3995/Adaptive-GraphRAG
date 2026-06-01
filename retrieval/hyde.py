@@ -24,6 +24,7 @@ class HyDEGenerator:
         # Use the fastest/cheapest model for hypothesis generation
         # Quality doesn't matter — just needs to be in the right domain
         self.model = "llama-3.1-8b-instant"
+        self.cache = {}
 
     def generate_hypothesis(self, query: str) -> str:
         """
@@ -32,6 +33,9 @@ class HyDEGenerator:
         Returns the hypothesis if successful, original query if it fails.
         Failure is acceptable — we fall back to the original query.
         """
+        if query in self.cache:
+            return self.cache[query]
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -52,7 +56,9 @@ class HyDEGenerator:
                 max_tokens=150  # Keep it short — just enough for semantic proximity
             )
             hypothesis = response.choices[0].message.content.strip()
-            return hypothesis if hypothesis else query
+            result = hypothesis if hypothesis else query
+            self.cache[query] = result
+            return result
         except Exception:
             # Silently fall back to original query on any error
             return query

@@ -207,7 +207,7 @@ def load_doc_systems(doc_name: str) -> dict:
 
     with open(f"{doc_path}/chunks.json", "r", encoding="utf-8") as f:
         chunks = json.load(f)
-        
+
     embeddings = np.load(f"{doc_path}/embeddings.npy")
 
     bm25 = BM25Retriever()
@@ -290,11 +290,11 @@ def compute_confidence(reranked_results: list) -> tuple:
     """
     if not reranked_results:
         return "Low", "🔴"
-    
+
     # Take average of top 3 scores
     top_scores = [score for _, score in reranked_results[:3]]
     avg_score = sum(top_scores) / len(top_scores)
-    
+
     if avg_score >= 2.0:
         return "High", "🟢"
     elif avg_score >= 0.0:
@@ -314,8 +314,16 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     # 1. Classify the Query
     query_type = classifier.classify(query)
 
-    # Decompose complex queries into sub-questions
-    sub_questions = decomposer.decompose(query)
+    # Decompose complex queries into sub-questions ONLY if beneficial
+    if query_type == "COMPLEX":
+        sub_questions = decomposer.decompose(query)
+    else:
+        sub_questions = [query]
+
+    # 2. Determine graph depth based on query type
+    # SIMPLE:1, MODERATE:2, COMPLEX:3, ALGORITHM:2, RESEARCH:3
+    depth_map = {"SIMPLE": 1, "MODERATE": 2, "COMPLEX": 3, "ALGORITHM": 2, "RESEARCH": 3}
+    graph_depth = depth_map.get(query_type, graph_depth)
     
     merged_candidates = []
     
@@ -354,18 +362,25 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     # Rerank against ORIGINAL query (not sub-questions)
     final_res = reranker.rerank(query, unique_candidates, top_k=top_k)
     
-    # Feature 5: Algorithm Aware Retrieval Boost
+    # Feature 5: Adaptive Reranking Boost
+    boost_keywords = []
     if query_type == "ALGORITHM":
-        alg_keywords = ['algorithm', 'pseudocode', 'procedure', 'step']
+        boost_keywords = ['algorithm', 'pseudocode', 'procedure', 'step', 'workflow']
+    elif query_type == "COMPLEX":
+        boost_keywords = ['compare', 'difference', 'advantage', 'disadvantage', 'tradeoff']
+    elif query_type == "RESEARCH":
+        boost_keywords = ['overview', 'survey', 'method', 'approach', 'framework']
+
+    if boost_keywords:
         boosted_res = []
         for chunk, score in final_res:
             text_lower = chunk.get("text", "").lower()
-            if any(kw in text_lower for kw in alg_keywords):
+            if any(kw in text_lower for kw in boost_keywords):
                 score = min(1.0, score * 1.2) # Boost score by 20%
             boosted_res.append((chunk, score))
         boosted_res.sort(key=lambda x: x[1], reverse=True)
         final_res = boosted_res
-    
+
     # 6. LLM Generation
     answer = llm.generate_answer(query, final_res, chat_history=chat_history)
 
@@ -383,11 +398,22 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     # Verify citations against actual retrieved sources
     answer = verify_citations(answer, sources)
 
+    # Capture trace reasoning
+    retrieval_trace = {
+        "query_type": query_type,
+        "sub_questions": sub_questions,
+        "graph_depth": graph_depth,
+        "retrieval_strategy": query_type,
+        "traversal_used": query_type,
+        "rerank_scores": [score for _, score in final_res[:5]]
+    }
+
     return {
         "answer": answer,
         "sources": sources,
         "confidence": confidence_label,
-        "confidence_emoji": confidence_emoji
+        "confidence_emoji": confidence_emoji,
+        "trace": retrieval_trace
     }
 
 
@@ -581,12 +607,19 @@ if prompt := st.chat_input(
                             )
                             st.caption(src["text"][:300] + "...")
                             st.divider()
+
+                # Retrieval Trace Expander
+                if result.get("trace"):
+                    with st.expander("🔍 Retrieval Trace"):
+                        st.json(result["trace"])
+
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": result["answer"],
                     "sources": result["sources"],
                     "confidence": result.get("confidence", "Medium"),
-                    "confidence_emoji": result.get("confidence_emoji", "🟡")
+                    "confidence_emoji": result.get("confidence_emoji", "🟡"),
+                    "trace": result.get("trace", {})
                 })
             except Exception as e:
                 st.error(f"Query failed: {e}")

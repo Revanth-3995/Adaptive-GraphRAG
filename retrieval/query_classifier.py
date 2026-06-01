@@ -19,15 +19,15 @@ class QueryClassifier:
     def classify(self, query: str) -> str:
         query_lower = query.lower()
 
-        # 1. ALGORITHM
+        # 1. RESEARCH
+        research_keywords = ['analyze', 'all approaches', 'evolution', 'explore', 'synthesis', 'review', 'comprehensive', 'survey']
+        if any(keyword in query_lower for keyword in research_keywords):
+            return "RESEARCH"
+
+        # 2. ALGORITHM
         algorithm_keywords = ['algorithm', 'pseudocode', 'procedure', 'steps', 'implement', 'code']
         if any(keyword in query_lower for keyword in algorithm_keywords):
             return "ALGORITHM"
-
-        # 2. RESEARCH
-        research_keywords = ['analyze', 'all approaches', 'evolution', 'explore', 'synthesis', 'review', 'comprehensive']
-        if any(keyword in query_lower for keyword in research_keywords):
-            return "RESEARCH"
 
         # 3. COMPLEX
         complex_keywords = ['compare', 'difference', 'vs', 'versus', 'pros and cons', 'better']
@@ -47,5 +47,6 @@ if __name__ == "__main__":
     assert qc.classify("What is routing?") == "SIMPLE"
     assert qc.classify("Compare Bellman-Ford and Dijkstra") == "COMPLEX"
     assert qc.classify("Give Dijkstra algorithm") == "ALGORITHM"
-    assert qc.classify("Analyze the evolution of routing algorithms") == "ALGORITHM" # Matches 'algorithm' first
+    assert qc.classify("Analyze the evolution of routing algorithms") == "RESEARCH" # Research priority first
+    assert qc.classify("Survey all routing methods") == "RESEARCH"
     print("All tests passed.")
