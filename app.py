@@ -66,6 +66,8 @@ def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
         progress_bar.progress(20, text="Chunking document...")
         chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
         chunks = chunker.process_pdf(source_path)
+        for chunk in chunks:
+            chunk["source_filename"] = filename
         with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
             json.dump(chunks, f, ensure_ascii=False)
 
@@ -138,6 +140,8 @@ def ingest_pdf(uploaded_file) -> dict:
         # 4. Run chunker
         chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
         chunks = chunker.process_pdf(source_path)
+        for chunk in chunks:
+            chunk["source_filename"] = filename
         with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
             json.dump(chunks, f, ensure_ascii=False)
 
@@ -281,24 +285,41 @@ def verify_citations(answer: str, sources: list) -> str:
     verified_answer = re.sub(citation_pattern, check_citation, answer)
     return verified_answer
 
-def compute_confidence(reranked_results: list) -> tuple:
-    """
-    Returns (label, color_emoji) based on top chunk scores.
-    Reranker scores are typically in range -10 to +10.
-    """
-    if not reranked_results:
-        return "Low", "🔴"
+def clean_answer_formatting(text: str) -> str:
+    """Convert • bullet characters to markdown - bullets Streamlit can render."""
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith('•'):
+            indent = len(line) - len(stripped)
+            line = ' ' * indent + '- ' + stripped[1:].lstrip()
+        cleaned.append(line)
+    return '\n'.join(cleaned)
 
-    # Take average of top 3 scores
-    top_scores = [score for _, score in reranked_results[:3]]
-    avg_score = sum(top_scores) / len(top_scores)
 
-    if avg_score >= 2.0:
-        return "High", "🟢"
-    elif avg_score >= 0.0:
-        return "Medium", "🟡"
-    else:
-        return "Low", "🔴"
+def parse_llm_response(raw: str) -> tuple:
+    """
+    Splits LLM response into (clean_answer, confidence_label, confidence_emoji).
+    LLM self-reports confidence — accurate regardless of query typos.
+    """
+    confidence_map = {
+        "HIGH":   ("High",   "🟢"),
+        "MEDIUM": ("Medium", "🟡"),
+        "LOW":    ("Low",    "🔴"),
+    }
+    label, emoji = "Medium", "🟡"
+    answer = raw.strip()
+
+    for key, (l, e) in confidence_map.items():
+        tag = f"CONFIDENCE: {key}"
+        if tag in raw:
+            label, emoji = l, e
+            answer = raw.replace(tag, "").strip()
+            break
+
+    answer = clean_answer_formatting(answer)
+    return answer, label, emoji
 
 def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: int = 1, chat_history: list = None) -> dict:
     shared = get_shared_models()
@@ -349,7 +370,8 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     final_res = reranker.rerank(query, unique_candidates, top_k=top_k)
 
     # 6. LLM Generation
-    answer = llm.generate_answer(query, final_res, chat_history=chat_history)
+    raw_answer = llm.generate_answer(query, final_res, chat_history=chat_history)
+    answer, confidence_label, confidence_emoji = parse_llm_response(raw_answer)
 
     sources = []
     for chunk, score in final_res:
@@ -359,8 +381,6 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
             "score": score,
             "text": chunk.get("text", "")
         })
-
-    confidence_label, confidence_emoji = compute_confidence(final_res)
 
     # Verify citations against actual retrieved sources
     answer = verify_citations(answer, sources)
@@ -513,7 +533,7 @@ if not st.session_state.uploaded_docs:
 # Chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+        st.markdown(msg["content"])
         if msg["role"] == "assistant":
             if msg.get("confidence"):
                 st.caption(
@@ -535,7 +555,7 @@ if prompt := st.chat_input(
 ):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.write(prompt)
+        st.markdown(prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("Searching your documents..."):
@@ -547,7 +567,7 @@ if prompt := st.chat_input(
                     graph_depth=graph_depth,
                     chat_history=st.session_state.messages
                 )
-                st.write(result["answer"])
+                st.markdown(result["answer"])
 
                 # Confidence badge
                 confidence = result.get("confidence", "Medium")
@@ -571,4 +591,12 @@ if prompt := st.chat_input(
                     "confidence_emoji": result.get("confidence_emoji", "🟡")
                 })
             except Exception as e:
-                st.error(f"Query failed: {e}")
+                error_msg = str(e)
+                if "429" in error_msg or "rate_limit" in error_msg.lower():
+                    st.error(
+                        "⏳ **API rate limit reached.** "
+                        "All models are temporarily exhausted. "
+                        "Try again in ~30 minutes or add a fresh Groq API key."
+                    )
+                else:
+                    st.error(f"Query failed: {e}")
