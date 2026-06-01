@@ -63,17 +63,20 @@ class DocumentChunker:
         self.chunk_size = chunk_size_words
         self.overlap = overlap_words
         self.chunks = []
+        self._nlp = None
+        self._spacy_failed = False
         
-    def _extract_tables_from_page(self, page) -> str:
+    def _extract_tables_from_page(self, page) -> List[str]:
         """
         Extracts tables from a PDF page and formats them as markdown tables.
         Uses PyMuPDF's built-in table detection.
         Falls back gracefully if no tables found.
+        Returns a list of markdown table strings.
         """
         try:
             tables = page.find_tables()
             if not tables or not tables.tables:
-                return ""
+                return []
 
             markdown_tables = []
             for table in tables.tables:
@@ -95,9 +98,9 @@ class DocumentChunker:
 
                 markdown_tables.append('\n'.join(md_rows))
 
-            return '\n\n'.join(markdown_tables)
+            return markdown_tables
         except Exception:
-            return ""
+            return []
 
     def _clean_text(self, text: str) -> str:
         """
@@ -119,51 +122,201 @@ class DocumentChunker:
                 cleaned_paragraphs.append(para)
         return '\n\n'.join(cleaned_paragraphs)
 
-    def _make_chunk(self, text: str, page_number: int, source_filename: str) -> Dict[str, Any]:
+    def _extract_metadata(self, text: str) -> Dict[str, Any]:
+        """
+        Extracts metadata using spaCy if available, fallback to regex, or empty.
+        Returns a dict with entities, keywords, noun_phrases and metadata_extractor.
+        """
+        meta = {
+            "entities": [],
+            "keywords": [],
+            "noun_phrases": [],
+            "metadata_extractor": "empty"
+        }
+        if not text.strip():
+            return meta
+
+        if not self._spacy_failed:
+            try:
+                import spacy
+                if self._nlp is None:
+                    self._nlp = spacy.load("en_core_web_sm")
+
+                doc = self._nlp(text)
+
+                entities = list(set([ent.text for ent in doc.ents if ent.label_ in ("ORG", "PERSON", "GPE", "PRODUCT", "EVENT")]))
+                noun_phrases = list(set([chunk.text for chunk in doc.noun_chunks if len(chunk.text.split()) > 1]))
+                keywords = list(set([token.text.lower() for token in doc if not token.is_stop and not token.is_punct and token.pos_ in ("NOUN", "PROPN", "VERB")]))
+
+                meta["entities"] = entities
+                meta["noun_phrases"] = noun_phrases
+                meta["keywords"] = keywords[:20]  # limit to top keywords
+                meta["metadata_extractor"] = "spacy"
+                return meta
+
+            except Exception:
+                self._spacy_failed = True
+                # Fallback to regex
+                pass
+
+        # Regex fallback
+        try:
+            # Capitalized terms (2 or more words) for entities/noun phrases
+            cap_terms = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', text)
+            meta["entities"] = list(set(cap_terms))
+
+            # Simple keyword extraction (words > 5 chars, start with uppercase)
+            keywords = re.findall(r'\b[A-Z][A-Za-z]{5,}\b', text)
+            meta["keywords"] = list(set(keywords))
+
+            meta["metadata_extractor"] = "regex"
+            return meta
+
+        except Exception:
+            meta["metadata_extractor"] = "empty"
+            return meta
+
+    def _make_chunk(self, text: str, page_number: int, source_filename: str, chunk_type: str = "text", heading: str = "", section_path: List[str] = None) -> Dict[str, Any]:
         """Helper to create a chunk dict with metadata."""
-        return {
+        if section_path is None:
+            section_path = []
+
+        word_count = len(text.split())
+        metadata = self._extract_metadata(text)
+
+        chunk = {
             "chunk_id": str(uuid.uuid4()),
             "text": text,
             "source_filename": source_filename,
-            "page_number": page_number
+            "page_number": page_number,
+            "heading": heading,
+            "section_path": section_path,
+            "word_count": word_count,
+            "chunk_type": chunk_type,
+            "entities": metadata["entities"],
+            "keywords": metadata["keywords"],
+            "noun_phrases": metadata["noun_phrases"],
+            "metadata_extractor": metadata["metadata_extractor"]
         }
+
+        return chunk
+
+    def _is_heading(self, text: str) -> bool:
+        """
+        Detects if a given string looks like a heading.
+        """
+        text = text.strip()
+        if not text:
+            return False
+
+        # ALL CAPS headings (allowing numbers and spaces)
+        if text.isupper() and len(text) > 3 and len(text) < 100:
+            return True
+
+        # Numbered headings (e.g., "1. Introduction", "5.1 Distance Vector Routing")
+        if re.match(r'^\d+(\.\d+)*\s+[A-Z]', text):
+            return True
+
+        # Chapter/Section titles
+        if text.lower().startswith(('chapter ', 'section ')):
+            return True
+
+        # Lines ending with ':'
+        if text.endswith(':') and len(text.split()) < 10:
+            return True
+
+        return False
 
     def _split_into_chunks(self, text: str, page_number: int, source_filename: str) -> List[Dict[str, Any]]:
         """
         Semantic chunking — splits at natural boundaries instead of fixed word count.
-        Priority order: paragraph breaks → heading breaks → sentence breaks → word count
+        Priority order: heading boundaries -> section boundaries -> paragraph boundaries -> sentence boundaries -> word count limits
         """
         # Step 1: Split by double newlines (paragraph boundaries)
         paragraphs = re.split(r'\n\s*\n', text)
         paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
         chunks = []
-        current_chunk_words = []
+        current_chunk_text = []
         current_word_count = 0
+        current_heading = ""
+        current_section_path = []
+
+        def save_current_chunk():
+            nonlocal current_chunk_text, current_word_count
+            if current_word_count >= 3:
+                chunk_text = ' '.join(current_chunk_text)
+                chunks.append(self._make_chunk(
+                    chunk_text,
+                    page_number,
+                    source_filename,
+                    chunk_type="text",
+                    heading=current_heading,
+                    section_path=list(current_section_path)
+                ))
+
+            if self.overlap > 0 and current_word_count >= 3:
+                # Retain overlap from end of current chunk
+                words = ' '.join(current_chunk_text).split()
+                overlap_words = words[-self.overlap:]
+                current_chunk_text = [' '.join(overlap_words)]
+                current_word_count = len(overlap_words)
+            else:
+                current_chunk_text = []
+                current_word_count = 0
 
         for para in paragraphs:
             para_words = para.split()
             para_word_count = len(para_words)
 
-            # If adding this paragraph would exceed chunk_size
-            if current_word_count + para_word_count > self.chunk_size and current_chunk_words:
-                # Save current chunk with overlap
-                chunk_text = ' '.join(current_chunk_words)
-                if len(current_chunk_words) >= 3:
-                    chunks.append(self._make_chunk(chunk_text, page_number, source_filename))
+            is_heading = self._is_heading(para)
 
-                # Start new chunk with overlap from end of previous
-                overlap_words = current_chunk_words[-self.overlap:] if self.overlap > 0 else []
-                current_chunk_words = overlap_words + para_words
-                current_word_count = len(current_chunk_words)
+            # If it's a heading, we likely want to start a new chunk
+            if is_heading:
+                if current_word_count > 0:
+                    save_current_chunk()
+                current_heading = para
+                # Update section path: limit to last 3 levels to avoid endless growth
+                current_section_path.append(para)
+                if len(current_section_path) > 3:
+                    current_section_path.pop(0)
+
+            # If adding this paragraph exceeds limit, OR it's a heading (concept boundary)
+            if current_word_count + para_word_count > self.chunk_size and current_word_count > 0:
+
+                # We need to split further if a single paragraph is too long (sentence split)
+                if para_word_count > self.chunk_size:
+                    save_current_chunk()
+
+                    sentences = re.split(r'(?<=[.!?])\s+', para)
+                    for sentence in sentences:
+                        sentence_words = sentence.split()
+                        sentence_word_count = len(sentence_words)
+
+                        if current_word_count + sentence_word_count > self.chunk_size and current_word_count > 0:
+                            save_current_chunk()
+
+                        current_chunk_text.append(sentence)
+                        current_word_count += sentence_word_count
+                else:
+                    save_current_chunk()
+                    current_chunk_text.append(para)
+                    current_word_count += para_word_count
             else:
-                current_chunk_words.extend(para_words)
+                current_chunk_text.append(para)
                 current_word_count += para_word_count
 
-        # Don't forget the last chunk
-        if len(current_chunk_words) >= 3:
-            chunk_text = ' '.join(current_chunk_words)
-            chunks.append(self._make_chunk(chunk_text, page_number, source_filename))
+        # Save remaining
+        if current_word_count >= 3:
+            chunk_text = ' '.join(current_chunk_text)
+            chunks.append(self._make_chunk(
+                chunk_text,
+                page_number,
+                source_filename,
+                chunk_type="text",
+                heading=current_heading,
+                section_path=list(current_section_path)
+            ))
 
         return chunks
 
@@ -189,7 +342,17 @@ class DocumentChunker:
             raw_text = page.get_text("text")
 
             # Extract tables separately
-            table_text = self._extract_tables_from_page(page)
+            table_texts = self._extract_tables_from_page(page)
+
+            for md_table in table_texts:
+                all_chunks.append(self._make_chunk(
+                    md_table,
+                    page_num,
+                    filename,
+                    chunk_type="table",
+                    heading="",
+                    section_path=[]
+                ))
 
             if not raw_text.strip():
                 # Page has no digital text — likely scanned or image-based
@@ -199,18 +362,15 @@ class DocumentChunker:
                 if raw_text.strip():
                     ocr_pages += 1
 
-            if not raw_text.strip() and not table_text:
+            if not raw_text.strip() and not table_texts:
                 print(f"      → Page {page_num}/{total_pages}: skipped (blank or unreadable)")
                 continue
 
-            # Combine regular text with table text
-            combined_text = raw_text
-            if table_text:
-                combined_text = raw_text + "\n\n" + table_text
-
-            clean_text = self._clean_text(combined_text)
-            page_chunks = self._split_into_chunks(clean_text, page_num, filename)
-            all_chunks.extend(page_chunks)
+            # Text processing
+            if raw_text.strip():
+                clean_text = self._clean_text(raw_text)
+                page_chunks = self._split_into_chunks(clean_text, page_num, filename)
+                all_chunks.extend(page_chunks)
 
         if ocr_pages > 0:
             print(f"      ✓ OCR extracted text from {ocr_pages} image-based page(s)")
