@@ -16,7 +16,13 @@ from retrieval.fusion import ResultFusion
 from retrieval.reranker import Reranker
 from retrieval.hyde import HyDEGenerator
 from retrieval.query_decomposer import QueryDecomposer
+from retrieval.query_classifier import QueryClassifier
 from llm import LLMGenerator
+
+# Phase 4 Answer Intelligence imports
+from citation_verifier import CitationVerifier
+from claim_extractor import ClaimExtractor
+from claim_verifier import ClaimVerifier
 
 # -----------------------------------------------------------------------------
 # 2. PAGE CONFIG
@@ -98,6 +104,15 @@ def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
         gb.build_graph(chunks, embeddings)
         gb.save_graph(output_path=f"{doc_path}/graph.pkl")
 
+        # Step 6 — Document Summary Generation
+        status_text.text("📝 Generating document summary...")
+        progress_bar.progress(90, text="Generating document summary...")
+        doc_text = "\n\n".join([c.get("text", "") for c in chunks])
+        llm = get_shared_models()["llm"]
+        embedder = get_shared_models()["embedder"]
+        doc_summary = llm.summarize_document(doc_text)
+        summary_emb = embedder.generate_query_embedding(doc_summary).tolist()
+
         # Write meta
         meta = {
             "filename": filename,
@@ -105,7 +120,9 @@ def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
             "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "page_count": len(set([c.get("page_number", 0) for c in chunks])),
             "chunk_count": len(chunks),
-            "status": "ready"
+            "status": "ready",
+            "document_summary": doc_summary,
+            "summary_embedding": summary_emb
         }
         with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f)
@@ -165,14 +182,23 @@ def ingest_pdf(uploaded_file) -> dict:
         gb.build_graph(chunks, embeddings)
         gb.save_graph(output_path=f"{doc_path}/graph.pkl")
 
-        # 9. Write meta.json
+        # 9. Document Summary Generation
+        doc_text = "\n\n".join([c.get("text", "") for c in chunks])
+        llm = get_shared_models()["llm"]
+        embedder = get_shared_models()["embedder"]
+        doc_summary = llm.summarize_document(doc_text)
+        summary_emb = embedder.generate_query_embedding(doc_summary).tolist()
+
+        # 10. Write meta.json
         meta = {
             "filename": filename,
             "doc_name": doc_name,
             "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "page_count": len(set([c.get("page_number", 0) for c in chunks])),
             "chunk_count": len(chunks),
-            "status": "ready"
+            "status": "ready",
+            "document_summary": doc_summary,
+            "summary_embedding": summary_emb
         }
         with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f)
@@ -196,7 +222,11 @@ def get_shared_models() -> dict:
         "llm": LLMGenerator(),
         "reranker": Reranker(),
         "hyde": HyDEGenerator(),
-        "decomposer": QueryDecomposer()
+        "decomposer": QueryDecomposer(),
+        "classifier": QueryClassifier(),
+        "citation_verifier": CitationVerifier(),
+        "claim_extractor": ClaimExtractor(),
+        "claim_verifier": ClaimVerifier()
     }
 
 
@@ -245,45 +275,26 @@ def get_doc_system(doc_name: str) -> dict:
 def verify_citations(answer: str, sources: list) -> str:
     """
     Verifies that source citations in the answer match actual retrieved chunks.
-    Marks unverified citations with a ⚠️ warning.
-
-    Example: [Source 1: test.pdf, Page 7] → checks if source 1 is actually
-    test.pdf page 7 in the sources list.
+    Marks unverified citations with a warning.
     """
-    import re
-
-    def check_citation(match):
-        full_cite = match.group(0)
-        try:
-            # Extract source number
-            src_num_match = re.search(r'Source\s+(\d+)', full_cite)
-            if not src_num_match:
-                return full_cite
-
-            src_num = int(src_num_match.group(1)) - 1  # 0-indexed
-
-            if src_num < 0 or src_num >= len(sources):
-                return f"{full_cite}⚠️"
-
-            actual_source = sources[src_num]
-
-            # Extract claimed filename from citation
-            filename_match = re.search(r'Source \d+:\s*([^,]+)', full_cite)
-            if filename_match:
-                claimed_file = filename_match.group(1).strip()
-                actual_file = actual_source.get("filename", "")
-
-                if claimed_file.lower() not in actual_file.lower():
-                    return f"{full_cite}⚠️"
-
-            return full_cite  # Citation verified
-        except Exception:
-            return full_cite  # On any error, leave citation unchanged
-
-    # Match patterns like [Source 1: test.pdf, Page 7] or [Source 1]
-    citation_pattern = r'\[Source\s+\d+(?:[^\]]*?)?\]'
-    verified_answer = re.sub(citation_pattern, check_citation, answer)
-    return verified_answer
+    retrieved_chunks = []
+    for s in sources:
+        chunk_dict = {
+            "source_filename": s.get("filename", ""),
+            "page_number": s.get("page", 0),
+            "text": s.get("text", "")
+        }
+        retrieved_chunks.append((chunk_dict, s.get("score", 0.0)))
+        
+    shared = get_shared_models()
+    cit_verifier = shared["citation_verifier"]
+    cit_res = cit_verifier.verify_citations(answer, retrieved_chunks)
+    
+    # Format markers for UI
+    v_answer = cit_res["verified_answer"]
+    v_answer = v_answer.replace(" [Verified]", " <span style='color:#2ecc71; font-weight:bold; font-size: 0.85em;'>✓ Verified</span>")
+    v_answer = v_answer.replace(" [Unverified]", " <span style='color:#e74c3c; font-weight:bold; font-size: 0.85em;'>⚠️ Unverified</span>")
+    return v_answer
 
 def clean_answer_formatting(text: str) -> str:
     """Convert • bullet characters to markdown - bullets Streamlit can render."""
@@ -328,13 +339,47 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     llm = shared["llm"]
     hyde = shared["hyde"]
     decomposer = shared["decomposer"]
+    classifier = shared["classifier"]
+    claim_extractor = shared["claim_extractor"]
+    claim_verifier = shared["claim_verifier"]
 
-    # Decompose complex queries into sub-questions
-    sub_questions = decomposer.decompose(query)
+    # 1. Understand Intent (Query Classification)
+    query_type = classifier.classify(query)
+
+    # 2. Retrieval Planning
+    traversal = "BFS"
+    use_decomposition = False
+    
+    if query_type == "SIMPLE":
+        graph_depth = 1
+        traversal = "BFS"
+        use_decomposition = False
+    elif query_type == "MODERATE":
+        graph_depth = 2
+        traversal = "BFS"
+        use_decomposition = False
+    elif query_type == "COMPLEX":
+        graph_depth = 3
+        traversal = "PPR"
+        use_decomposition = True
+    elif query_type == "ALGORITHM":
+        graph_depth = 2
+        traversal = "BFS"
+        use_decomposition = False
+    elif query_type == "RESEARCH":
+        graph_depth = 3
+        traversal = "HYBRID"
+        use_decomposition = True
+
+    # 3. Query Decomposition (Conditional)
+    if use_decomposition:
+        sub_questions = decomposer.decompose(query)
+    else:
+        sub_questions = [query]
 
     merged_candidates = []
 
-    # Retrieve for each sub-question separately
+    # 4. Parallel-style Search per sub-question
     for sub_q in sub_questions:
         hypothesis = hyde.generate_hypothesis(sub_q)
         q_emb_hyde = embedder.generate_query_embedding(hypothesis)
@@ -349,12 +394,17 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
             graph_res = []
             if graph_depth > 0:
                 seeds = [res[0] for res in sys["vs"].vector_search(q_emb_original, top_k=3)]
-                graph_res = sys["gr"].graph_based_retrieval(seeds, max_depth=graph_depth, use_bfs=True)
+                graph_res = sys["gr"].graph_based_retrieval(
+                    seeds, 
+                    max_depth=graph_depth, 
+                    use_bfs=True,
+                    strategy=traversal
+                )
 
             fused_res = sys["fusion"].fuse_results(bm25_res, vec_res, graph_res, top_k=10)
             merged_candidates.extend(fused_res)
 
-    # Deduplicate by chunk_id before reranking
+    # 5. Global Deduplication by chunk_id
     seen_ids = set()
     unique_candidates = []
     for chunk, score in merged_candidates:
@@ -366,11 +416,24 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     unique_candidates.sort(key=lambda x: x[1], reverse=True)
     unique_candidates = unique_candidates[:50]
 
-    # Rerank against ORIGINAL query (not sub-questions)
-    final_res = reranker.rerank(query, unique_candidates, top_k=top_k)
+    # Rerank against ORIGINAL query with query type term boosting
+    final_res = reranker.rerank(query, unique_candidates, top_k=top_k, query_type=query_type)
+
+    # Load active document summaries
+    document_summaries = []
+    for doc_name in doc_names:
+        meta_path = f"doc_store/{doc_name}/meta.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if "document_summary" in meta:
+                    document_summaries.append(f"Document: {meta.get('filename', doc_name)}\nSummary: {meta['document_summary']}")
+            except:
+                pass
 
     # 6. LLM Generation
-    raw_answer = llm.generate_answer(query, final_res, chat_history=chat_history)
+    raw_answer = llm.generate_answer(query, final_res, chat_history=chat_history, document_summaries=document_summaries)
     answer, confidence_label, confidence_emoji = parse_llm_response(raw_answer)
 
     sources = []
@@ -385,11 +448,30 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     # Verify citations against actual retrieved sources
     answer = verify_citations(answer, sources)
 
+    # Extract and verify claims
+    claims_list = claim_extractor.extract_claims(answer)
+    verify_res = claim_verifier.verify_claims(claims_list, final_res)
+
+    # Record trace information
+    trace = {
+        "query_type": query_type,
+        "sub_questions": sub_questions,
+        "traversal_used": traversal,
+        "graph_depth": graph_depth,
+        "retrieval_strategy": f"BM25 + Vector + Graph ({traversal})",
+        "candidate_pool_size": len(unique_candidates)
+    }
+
     return {
         "answer": answer,
         "sources": sources,
         "confidence": confidence_label,
-        "confidence_emoji": confidence_emoji
+        "confidence_emoji": confidence_emoji,
+        "grounding_score": verify_res["grounding_score"],
+        "trust_level": verify_res["trust_level"],
+        "hallucination_risk": verify_res["hallucination_risk"],
+        "claims": verify_res["claims"],
+        "trace": trace
     }
 
 
@@ -530,24 +612,89 @@ if not st.session_state.uploaded_docs:
     st.info("👈 Upload a PDF using the sidebar to begin")
     st.stop()
 
+def render_assistant_dashboard(msg: dict):
+    # Confidence badge
+    if msg.get("confidence"):
+        st.caption(
+            f"{msg['confidence_emoji']} **Confidence: {msg['confidence']}**"
+        )
+        
+    # Phase 4 Trust Dashboard
+    if "trust_level" in msg:
+        tl = msg["trust_level"]
+        gs = msg["grounding_score"]
+        hr = msg["hallucination_risk"]
+        
+        # Color mapping
+        color_map = {
+            "VERIFIED": ("🛡️ Verified", "green"),
+            "HIGH CONFIDENCE": ("🟢 High Confidence", "blue"),
+            "MEDIUM CONFIDENCE": ("🟡 Medium Confidence", "orange"),
+            "LOW CONFIDENCE": ("🟠 Low Confidence", "red"),
+            "UNTRUSTED": ("⚠️ Untrusted", "red")
+        }
+        label, color = color_map.get(tl, (f"❔ {tl}", "gray"))
+        
+        # Draw badge and progress
+        st.markdown(f"**Trust Metric**: :{color}[{label}] ({gs}% Grounded)")
+        st.progress(max(0.0, min(1.0, gs / 100.0)))
+        
+        # Show claims break-down if any
+        if msg.get("claims"):
+            with st.expander("📝 Claim Verification Breakdown"):
+                for c in msg["claims"]:
+                    status = c.get("status", "UNSUPPORTED")
+                    explanation = c.get("explanation", "")
+                    claim_text = c.get("claim", "")
+                    
+                    status_colors = {
+                        "SUPPORTED": "green",
+                        "PARTIALLY_SUPPORTED": "orange",
+                        "UNSUPPORTED": "red"
+                    }
+                    col = status_colors.get(status, "gray")
+                    st.markdown(f"**Claim**: {claim_text}")
+                    st.markdown(f"Status: :{col}[{status}]")
+                    st.caption(explanation)
+                    st.divider()
+                    
+        # Check for hallucination risk warnings
+        if hr in ["HIGH", "MEDIUM"]:
+            unsupported = [c for c in msg.get("claims", []) if c.get("status") == "UNSUPPORTED"]
+            if unsupported:
+                st.warning(f"⚠️ **Hallucination Risk Warning: {hr}**\n\nThe following claims are UNSUPPORTED by the retrieved documents:\n" + 
+                           "\n".join([f"- *{c['claim']}*" for c in unsupported]))
+
+    # Traces
+    if msg.get("trace"):
+        with st.expander("🔍 Adaptive Retrieval Trace"):
+            t = msg["trace"]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Query Intent", t.get("query_type"))
+            c2.metric("Traversal", t.get("traversal_used"))
+            c3.metric("Graph Depth", t.get("graph_depth"))
+            if len(t.get("sub_questions", [])) > 1:
+                st.write("**Decomposed Sub-Questions:**")
+                for sq in t.get("sub_questions", []):
+                    st.markdown(f"- *{sq}*")
+
+    # Sources
+    if msg.get("sources"):
+        with st.expander(f"📚 Sources ({len(msg['sources'])} chunks)"):
+            for src in msg["sources"]:
+                st.markdown(
+                    f"**{src['filename']}** · Page {src['page']} · "
+                    f"Score: {src['score']:.2f}"
+                )
+                st.caption(src["text"][:300] + "...")
+                st.divider()
+
 # Chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.markdown(msg["content"], unsafe_allow_html=True)
         if msg["role"] == "assistant":
-            if msg.get("confidence"):
-                st.caption(
-                    f"{msg['confidence_emoji']} **Confidence: {msg['confidence']}**"
-                )
-            if msg.get("sources"):
-                with st.expander(f"📚 Sources ({len(msg['sources'])} chunks)"):
-                    for src in msg["sources"]:
-                        st.markdown(
-                            f"**{src['filename']}** · Page {src['page']} · "
-                            f"Score: {src['score']:.2f}"
-                        )
-                        st.caption(src["text"][:300] + "...")
-                        st.divider()
+            render_assistant_dashboard(msg)
 
 if prompt := st.chat_input(
     "Ask anything about your documents...",
@@ -567,28 +714,20 @@ if prompt := st.chat_input(
                     graph_depth=graph_depth,
                     chat_history=st.session_state.messages
                 )
-                st.markdown(result["answer"])
-
-                # Confidence badge
-                confidence = result.get("confidence", "Medium")
-                emoji = result.get("confidence_emoji", "🟡")
-                st.caption(f"{emoji} **Confidence: {confidence}** — based on document relevance scores")
-
-                if result["sources"]:
-                    with st.expander(f"📚 Sources ({len(result['sources'])} chunks)"):
-                        for src in result["sources"]:
-                            st.markdown(
-                                f"**{src['filename']}** · Page {src['page']} · "
-                                f"Score: {src['score']:.2f}"
-                            )
-                            st.caption(src["text"][:300] + "...")
-                            st.divider()
+                st.markdown(result["answer"], unsafe_allow_html=True)
+                render_assistant_dashboard(result)
+                
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": result["answer"],
                     "sources": result["sources"],
                     "confidence": result.get("confidence", "Medium"),
-                    "confidence_emoji": result.get("confidence_emoji", "🟡")
+                    "confidence_emoji": result.get("confidence_emoji", "🟡"),
+                    "grounding_score": result.get("grounding_score", 100.0),
+                    "trust_level": result.get("trust_level", "VERIFIED"),
+                    "hallucination_risk": result.get("hallucination_risk", "LOW"),
+                    "claims": result.get("claims", []),
+                    "trace": result.get("trace")
                 })
             except Exception as e:
                 error_msg = str(e)

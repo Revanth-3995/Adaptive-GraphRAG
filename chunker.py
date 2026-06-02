@@ -10,6 +10,7 @@ if tesseract_path:
     import pytesseract
     pytesseract.pytesseract.tesseract_cmd = tesseract_path
 from typing import List, Dict, Any
+from metadata_extractor import MetadataExtractor
 
 # OCR support — only imported if needed
 def _ocr_page(page) -> str:
@@ -63,6 +64,7 @@ class DocumentChunker:
         self.chunk_size = chunk_size_words
         self.overlap = overlap_words
         self.chunks = []
+        self.extractor = MetadataExtractor()
         
     def _extract_tables_from_page(self, page) -> str:
         """
@@ -119,13 +121,18 @@ class DocumentChunker:
                 cleaned_paragraphs.append(para)
         return '\n\n'.join(cleaned_paragraphs)
 
-    def _make_chunk(self, text: str, page_number: int, source_filename: str) -> Dict[str, Any]:
+    def _make_chunk(self, text: str, page_number: int, source_filename: str, chunk_type: str = "text") -> Dict[str, Any]:
         """Helper to create a chunk dict with metadata."""
+        meta = self.extractor.extract(text)
         return {
             "chunk_id": str(uuid.uuid4()),
             "text": text,
             "source_filename": source_filename,
-            "page_number": page_number
+            "page_number": page_number,
+            "chunk_type": chunk_type,
+            "entities": meta["entities"],
+            "keywords": meta["keywords"],
+            "noun_phrases": meta["noun_phrases"]
         }
 
     def _split_into_chunks(self, text: str, page_number: int, source_filename: str) -> List[Dict[str, Any]]:
@@ -188,8 +195,31 @@ class DocumentChunker:
         for page_num, page in enumerate(doc, start=1):
             raw_text = page.get_text("text")
 
-            # Extract tables separately
-            table_text = self._extract_tables_from_page(page)
+            # Extract tables separately and convert to table chunks
+            tables_chunks = []
+            try:
+                tables = page.find_tables()
+                if tables and tables.tables:
+                    for table in tables.tables:
+                        rows = table.extract()
+                        if not rows or len(rows) < 2:
+                            continue
+                        
+                        # Build markdown table
+                        md_rows = []
+                        header = [str(cell).strip() if cell else "" for cell in rows[0]]
+                        md_rows.append("| " + " | ".join(header) + " |")
+                        md_rows.append("|" + "|".join(["---"] * len(header)) + "|")
+                        
+                        for row in rows[1:]:
+                            row = [str(cell).strip() if cell else "" for cell in row]
+                            md_rows.append("| " + " | ".join(row) + " |")
+                            
+                        table_md = '\n'.join(md_rows)
+                        t_chunk = self._make_chunk(table_md, page_num, filename, chunk_type="table")
+                        tables_chunks.append(t_chunk)
+            except Exception:
+                pass
 
             if not raw_text.strip():
                 # Page has no digital text — likely scanned or image-based
@@ -199,18 +229,19 @@ class DocumentChunker:
                 if raw_text.strip():
                     ocr_pages += 1
 
-            if not raw_text.strip() and not table_text:
+            if not raw_text.strip() and not tables_chunks:
                 print(f"      → Page {page_num}/{total_pages}: skipped (blank or unreadable)")
                 continue
 
-            # Combine regular text with table text
-            combined_text = raw_text
-            if table_text:
-                combined_text = raw_text + "\n\n" + table_text
-
-            clean_text = self._clean_text(combined_text)
+            clean_text = self._clean_text(raw_text)
             page_chunks = self._split_into_chunks(clean_text, page_num, filename)
+            
+            # Set chunk_type for text chunks explicitly
+            for chunk in page_chunks:
+                chunk["chunk_type"] = "text"
+                
             all_chunks.extend(page_chunks)
+            all_chunks.extend(tables_chunks)
 
         if ocr_pages > 0:
             print(f"      ✓ OCR extracted text from {ocr_pages} image-based page(s)")

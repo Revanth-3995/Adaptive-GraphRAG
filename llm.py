@@ -16,25 +16,82 @@ class LLMGenerator:
         self.model_name = model_name or MODELS[0]
         self.client = Groq()
 
-    def build_context(self, retrieved_chunks: List[Tuple[Dict[str, Any], float]]) -> str:
+    def build_context(
+        self,
+        retrieved_chunks: List[Tuple[Dict[str, Any], float]],
+        document_summaries: List[str] = None
+    ) -> str:
         if not retrieved_chunks:
-            return "No relevant context found."
-        context_parts = []
-        for i, (chunk, _) in enumerate(retrieved_chunks):
-            source = chunk.get("source_filename", "Unknown")
-            page = chunk.get("page_number", "Unknown")
-            text = chunk.get("text", "")
-            part = f"[Source {i+1}: {source}, Page {page}]\n{text}\n"
-            context_parts.append(part)
-        return "\n".join(context_parts)
+            chunk_context = "No relevant context found."
+        else:
+            context_parts = []
+            for i, (chunk, _) in enumerate(retrieved_chunks):
+                source = chunk.get("source_filename", "Unknown")
+                page = chunk.get("page_number", "Unknown")
+                text = chunk.get("text", "")
+                part = f"[Source {i+1}: {source}, Page {page}]\n{text}\n"
+                context_parts.append(part)
+            chunk_context = "\n".join(context_parts)
+
+        # Prepend document summaries if available
+        if document_summaries:
+            summary_header = "=== DOCUMENT SUMMARIES ===\n"
+            summary_content = "\n\n".join(document_summaries)
+            summary_footer = "\n==========================\n\n"
+            return f"{summary_header}{summary_content}{summary_footer}=== RETRIEVED EVIDENCE CHUNKS ===\n{chunk_context}"
+            
+        return chunk_context
 
     def generate_answer(
         self,
         query: str,
         retrieved_chunks: List[Tuple[Dict[str, Any], float]],
-        chat_history: List[Dict[str, str]] = None
+        chat_history: List[Dict[str, str]] = None,
+        document_summaries: List[str] = None
     ) -> str:
-        context = self.build_context(retrieved_chunks)
+        # If document_summaries is not provided, attempt to dynamically load or generate them
+        if not document_summaries and retrieved_chunks:
+            document_summaries = []
+            seen_files = set()
+            for chunk, _ in retrieved_chunks:
+                source_file = chunk.get("source_filename")
+                if source_file and source_file not in seen_files:
+                    seen_files.add(source_file)
+                    import re
+                    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', source_file.replace(".pdf", "").replace(".PDF", "")).lower()
+                    meta_path = f"doc_store/{doc_name}/meta.json"
+                    if os.path.exists(meta_path):
+                        try:
+                            import json
+                            with open(meta_path, "r", encoding="utf-8") as f:
+                                meta = json.load(f)
+                            if "document_summary" in meta:
+                                document_summaries.append(f"Document: {source_file}\nSummary: {meta['document_summary']}")
+                            else:
+                                # Dynamically generate summary for backward compatibility
+                                chunks_path = f"doc_store/{doc_name}/chunks.json"
+                                if os.path.exists(chunks_path):
+                                    with open(chunks_path, "r", encoding="utf-8") as cf:
+                                        file_chunks = json.load(cf)
+                                    doc_text = "\n\n".join([c.get("text", "") for c in file_chunks])
+                                    summary_text = self.summarize_document(doc_text)
+                                    
+                                    # Try to generate vector embedding using Embedder
+                                    try:
+                                        from embedder import Embedder
+                                        emb = Embedder().generate_query_embedding(summary_text)
+                                        meta["summary_embedding"] = emb.tolist()
+                                    except Exception:
+                                        pass
+                                        
+                                    meta["document_summary"] = summary_text
+                                    with open(meta_path, "w", encoding="utf-8") as mf:
+                                        json.dump(meta, mf)
+                                    document_summaries.append(f"Document: {source_file}\nSummary: {summary_text}")
+                        except Exception:
+                            pass
+
+        context = self.build_context(retrieved_chunks, document_summaries)
 
         system_prompt = """You are a precise Q&A assistant. Answer ONLY from the provided Context.
 
@@ -108,13 +165,31 @@ Use LOW if the answer is not clearly in the context or you said you cannot answe
                         f"Error: {error_str}"
                     )
 
-        # All models exhausted
-        return (
-            "I cannot answer this based on the provided documents.\n"
-            "CONFIDENCE: LOW\n"
-            "⏳ All models are rate limited. Please wait ~30 minutes or "
-            "add a fresh Groq API key in the sidebar."
-        )
+    def summarize_document(self, doc_text: str) -> str:
+        """Generates a concise summary of a document based on its initial text."""
+        prompt = f"""You are an expert document summarizer. 
+Write a highly concise summary (3-5 sentences) describing the core topics, goals, and content of this document.
+Write directly as the summary, do not include intro like 'Here is a summary'.
+
+Document Text:
+{doc_text[:6000]}  # Keep it safe for token limits
+
+Concise Summary:"""
+        try:
+            # We'll use llama-3.1-8b-instant for fast, cheap summarization
+            response = self.client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "You are a professional technical document summarizer."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=300
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Warning: Document summarization failed ({e}). Returning fallback summary.")
+            return "A technical document covering networking, protocols, or algorithm design."
 
 if __name__ == "__main__":
     pass

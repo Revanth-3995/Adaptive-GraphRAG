@@ -73,10 +73,68 @@ class GraphBuilder:
                 text=chunk["text"], 
                 source=chunk["source_filename"],
                 page=chunk["page_number"],
+                chunk_type=chunk.get("chunk_type", "text"),
+                entities=chunk.get("entities", []),
+                keywords=chunk.get("keywords", []),
+                noun_phrases=chunk.get("noun_phrases", []),
                 idx=i # Store the embedding index for reference
             )
             
-        # 2. Add edges based on semantic similarity
+    def _add_typed_edge(self, u, v, weight, edge_type):
+        """Helper to safely add/update edges with types metadata."""
+        if self.graph.has_edge(u, v):
+            current_types = self.graph[u][v].get("types", [])
+            if edge_type not in current_types:
+                current_types.append(edge_type)
+            self.graph[u][v]["types"] = current_types
+            self.graph[u][v]["weight"] = max(self.graph[u][v].get("weight", 0.0), weight)
+        else:
+            self.graph.add_edge(u, v, weight=weight, types=[edge_type])
+
+    def build_graph(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray) -> nx.Graph:
+        """
+        Builds the semantic graph by computing pairwise similarities and typing edges.
+        """
+        print(f"Building graph for {len(chunks)} nodes...")
+        
+        # 1. Add all nodes
+        for i, chunk in enumerate(chunks):
+            self.graph.add_node(
+                chunk["chunk_id"], 
+                text=chunk["text"], 
+                source=chunk["source_filename"],
+                page=chunk["page_number"],
+                chunk_type=chunk.get("chunk_type", "text"),
+                entities=chunk.get("entities", []),
+                keywords=chunk.get("keywords", []),
+                noun_phrases=chunk.get("noun_phrases", []),
+                idx=i # Store the embedding index for reference
+            )
+            
+        # 2. Add consecutive section edges
+        for i in range(len(chunks) - 1):
+            if chunks[i].get("source_filename") == chunks[i+1].get("source_filename"):
+                self._add_typed_edge(chunks[i]["chunk_id"], chunks[i+1]["chunk_id"], 0.9, "section")
+                
+        # 3. Add page proximity edges and shared entity edges
+        for i in range(len(chunks)):
+            for j in range(i + 1, len(chunks)):
+                # Page proximity edges within same document
+                if chunks[i].get("source_filename") == chunks[j].get("source_filename"):
+                    page_diff = abs(chunks[i].get("page_number", 0) - chunks[j].get("page_number", 0))
+                    if page_diff <= 1:
+                        weight = 0.8 if page_diff == 0 else 0.6
+                        self._add_typed_edge(chunks[i]["chunk_id"], chunks[j]["chunk_id"], weight, "page")
+                        
+                # Shared entity edges
+                entities_i = set(chunks[i].get("entities", []))
+                entities_j = set(chunks[j].get("entities", []))
+                common_entities = entities_i.intersection(entities_j)
+                if common_entities:
+                    weight = min(0.9, 0.5 + 0.1 * len(common_entities))
+                    self._add_typed_edge(chunks[i]["chunk_id"], chunks[j]["chunk_id"], weight, "entity")
+            
+        # 4. Add edges based on semantic similarity
         # We iterate over all unique pairs (i, j) where i < j
         for i in range(len(chunks)):
             similarities = []
@@ -106,8 +164,7 @@ class GraphBuilder:
             node_i_id = chunks[i]["chunk_id"]
             for j, sim in top_similar:
                 node_j_id = chunks[j]["chunk_id"]
-                # nx.Graph is undirected, adding (u,v) is same as (v,u)
-                self.graph.add_edge(node_i_id, node_j_id, weight=sim)
+                self._add_typed_edge(node_i_id, node_j_id, sim, "similarity")
                 
         self.print_graph_stats()
         return self.graph

@@ -8,6 +8,7 @@ and retrieves for each one separately.
 import os
 import json
 from groq import Groq
+from retrieval.query_classifier import QueryClassifier
 
 
 class QueryDecomposer:
@@ -15,16 +16,26 @@ class QueryDecomposer:
     def __init__(self):
         self.client = Groq()
         self.model = "llama-3.1-8b-instant"  # fast cheap model for decomposition
+        self.classifier = QueryClassifier()
 
     def decompose(self, query: str) -> list:
         """
         Returns a list of sub-questions.
-        For simple questions, returns [original_query].
-        For complex questions, returns [sub_q1, sub_q2, ...].
-
+        
+        For SIMPLE, MODERATE, or ALGORITHM questions, bypasses LLM call and 
+        returns [original_query].
+        
+        For COMPLEX or RESEARCH questions, uses LLM to split into focused sub-questions.
         Always includes the original query as the last item to ensure
         the full question is also retrieved for.
         """
+        # 1. Deterministic Classifier Check
+        q_type = self.classifier.classify(query)
+        if q_type in ("SIMPLE", "MODERATE", "ALGORITHM"):
+            # Do not decompose these query types
+            return [query]
+
+        # 2. Decompose only when beneficial (COMPLEX or RESEARCH)
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -67,5 +78,6 @@ Respond with ONLY "SIMPLE" or a valid JSON array. Nothing else."""
 
             return [query]  # fallback
 
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Query decomposition failed ({e}). Falling back to original query.")
             return [query]  # always fallback to original query on any error
