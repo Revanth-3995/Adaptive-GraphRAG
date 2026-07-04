@@ -50,7 +50,7 @@ class LLMGenerator:
         document_summaries: List[str] = None
     ) -> str:
         # If document_summaries is not provided, attempt to dynamically load or generate them
-        if not document_summaries and retrieved_chunks:
+        if document_summaries is None and retrieved_chunks:
             document_summaries = []
             seen_files = set()
             for chunk, _ in retrieved_chunks:
@@ -143,12 +143,16 @@ Use LOW if the answer is not clearly in the context or you said you cannot answe
         # Try each model in fallback chain
         for model in MODELS:
             try:
+                if self.client:
+                    self.client.api_key = os.environ.get("GROQ_API_KEY") or self.client.api_key
                 response = self.client.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=0.1,
                     max_tokens=1500
                 )
+                from performance_tracker import PerformanceTracker
+                PerformanceTracker().increment_llm_calls()
                 self.model_name = model
                 return response.choices[0].message.content
 
@@ -177,6 +181,8 @@ Document Text:
 Concise Summary:"""
         try:
             # We'll use llama-3.1-8b-instant for fast, cheap summarization
+            if self.client:
+                self.client.api_key = os.environ.get("GROQ_API_KEY") or self.client.api_key
             response = self.client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
@@ -186,6 +192,8 @@ Concise Summary:"""
                 temperature=0.1,
                 max_tokens=300
             )
+            from performance_tracker import PerformanceTracker
+            PerformanceTracker().increment_llm_calls()
             return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"Warning: Document summarization failed ({e}). Returning fallback summary.")

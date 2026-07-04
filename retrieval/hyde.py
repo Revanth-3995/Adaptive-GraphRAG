@@ -74,6 +74,7 @@ class HyDEGenerator:
 
         # 2. Cache Miss: Generate using LLM
         try:
+            self.client.api_key = os.environ.get("GROQ_API_KEY") or self.client.api_key
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -93,6 +94,9 @@ class HyDEGenerator:
                 max_tokens=150  # Keep it short — just enough for semantic proximity
             )
             hypothesis = response.choices[0].message.content.strip()
+            
+            from performance_tracker import PerformanceTracker
+            PerformanceTracker().increment_llm_calls()
             
             if hypothesis:
                 # 3. Thread-safe Cache Update & Persist

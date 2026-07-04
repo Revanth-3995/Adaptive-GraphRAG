@@ -1,63 +1,98 @@
 # 🕸️ Adaptive GraphRAG
 
-A hybrid retrieval-augmented generation system that combines multiple retrieval strategies for accurate and contextually relevant question answering from PDF documents.
+A hybrid retrieval-augmented generation (RAG) system that combines multiple retrieval strategies, query intent classification, and an advanced verification framework for accurate and contextually relevant question answering from PDF documents.
 
 ## ✨ Features
 
-- **Hybrid Retrieval**: Combines BM25 (lexical), FAISS (semantic), and Knowledge Graph (context) retrieval
-- **Semantic Graph**: Builds knowledge graphs from document chunks for multi-hop context expansion
-- **Cross-Encoder Reranking**: Refines results using deep attention-based relevance scoring
-- **Result Fusion**: Intelligent weighted combination of multiple retrieval methods
-- **Interactive UI**: Streamlit-based web interface for easy querying
-- **Scalable Architecture**: Modular design supporting optimization and scaling
-- **Complexity Analysis**: Built-in benchmarking and performance profiling tools
+- **Hybrid Retrieval**: Combines BM25 (lexical), FAISS (semantic), and Knowledge Graph (context) retrieval.
+- **Semantic Graph**: Builds knowledge graphs from document chunks using cosine similarity thresholds for multi-hop context expansion. Offers BFS, PPR (Personalized PageRank), Random Walk, and PPR+Random Walk hybrid traversal strategies.
+- **Adaptive Retrieval Planning**: Classifies query intent into `SIMPLE`, `MODERATE`, `COMPLEX`, `ALGORITHM`, or `RESEARCH` to formulate a tailored retrieval plan.
+- **Query Decomposition & HyDE**: Automatically decomposes complex queries into focused sub-questions for parallel execution, and utilizes HyDE (Hypothetical Document Embeddings) to improve vector retrieval.
+- **Cross-Encoder Reranking**: Refines results using deep attention-based relevance scoring with intent-based keyword boosts.
+- **Phase 4 Answer Intelligence & Trust Framework**:
+  - **Claim Extraction**: Extracts factual claims from generated answers.
+  - **Claim Verification**: Automatically verifies claims against retrieved chunks, calculating a **Grounding Score**, **Trust Level**, and **Hallucination Risk**.
+  - **Citation Verification**: Automatically verifies and injects inline source citations, classifying them as valid or failed.
+  - **Modes**: Choose between **FAST** (direct generation) and **VERIFIED** (full claim verification and trust framework) modes.
+- **Performance Diagnostics & Logging**:
+  - Global, thread-safe `PerformanceTracker` logging execution times, LLM calls, bottleneck identification, and verification overhead to `performance_logs/performance_trace.json`.
+  - Detailed answer quality reports saved to `graph/answer_quality_report.json`.
+- **Multi-Tenant / Multi-Workspace Support**: SQLite-based workspace and chat history database (`storage.py`) for maintaining isolated workspaces.
+- **Multi-Provider LLM Manager**: Real-time provider health checking and compatibility with Groq, OpenAI, Gemini, and Claude APIs (`providers.py`).
+- **Interactive UI**: Streamlit-based workspace dashboard featuring visual graph rendering, real-time performance bottleneck charts, chat history, and document management.
 
 ## 🏗️ Architecture
 
 ```
 User Query
     ↓
-┌─────────────────────────────────────────┐
-│         Retrieval Pipeline               │
-│  ┌────────┐  ┌────────┐  ┌────────┐   │
-│  │  BM25  │  │ FAISS  │  │ Graph  │   │
-│  │Lexical │  │Semantic│  │Context │   │
-│  └───┬────┘  └───┬────┘  └───┬────┘   │
-│      └───────────┼───────────┘          │
-│                  ▼                       │
-│           Result Fusion                  │
-│                  ▼                       │
-│            Reranker                      │
-│         (Cross-Encoder)                  │
-└──────────────────┬──────────────────────┘
-                   ↓
-              LLM Generator
-                   ↓
-              Final Answer
+┌────────────────────────────────────────────────────────┐
+│               Retrieval Planner / Intent               │
+│                        ↓                               │
+│              Query Decomposition & HyDE                │
+│                        ↓                               │
+│  ┌──────────────────┬──────────────────┬────────────┐  │
+│  │   BM25 Search    │  Vector (FAISS)  │ Graph Walk │  │
+│  │     (Lexical)    │    (Semantic)    │ (Context)  │  │
+│  └────────┬─────────┴────────┬─────────┴─────┬──────┘  │
+│           └──────────────────┼───────────────┘         │
+│                              ▼                         │
+│                        Result Fusion                   │
+│                              ▼                         │
+│                          Reranker                      │
+│                       (Cross-Encoder)                  │
+└──────────────────────────────┬─────────────────────────┘
+                               ↓
+                         LLM Generator
+                               ↓
+┌────────────────────────────────────────────────────────┐
+│             Answer Intelligence & Trust                │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Claim Extraction & Verification                 │  │
+│  │  (Grounding Score, Trust Level, Hallucination)   │  │
+│  ├──────────────────────────────────────────────────┤  │
+│  │  Citation Verification & Formatting              │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────────────────────────────┬─────────────────────────┘
+                               ↓
+                          Final Answer
 ```
 
 ## 📁 Project Structure
 
 ```
 .
-├── data/                         # Raw PDF documents
-├── embeddings/                   # Dense vectors and FAISS index
-├── graph/                        # Graph and BM25 data
-├── retrieval/                    # Phase 2 retrieval modules
+├── embeddings/                   # Dense vectors and FAISS indices
+├── graph/                        # Graph structures, BM25 indices, reports, and traces
+├── retrieval/                    # Retrieval modules
 │   ├── bm25_index.py             # BM25 keyword search
 │   ├── fusion.py                 # Multi-method result fusion
-│   ├── graph_retriever.py        # BFS/DFS context expansion
+│   ├── graph_retriever.py        # Graph traversal (BFS, PPR, Random Walk, etc.)
+│   ├── hyde.py                   # Hypothetical Document Embeddings (HyDE) generator
+│   ├── query_classifier.py       # Query intent classification
+│   ├── query_decomposer.py       # Multi-query decomposition
 │   ├── reranker.py               # Cross-Encoder scoring
 │   └── vector_search.py          # FAISS semantic search
+├── evaluation/                   # Evaluation & auditing scripts
+│   ├── answer_evaluator.py       # Evaluation metrics
+│   ├── test_answer_intelligence.py # Tests for Phase 4 answer intelligence
+│   └── performance_audit.py      # Automated performance auditing tool
+├── performance_logs/             # Execution and latency logs
 ├── chunker.py                    # PDF extraction and chunking
 ├── embedder.py                   # SentenceTransformer embeddings
 ├── graph_builder.py              # Semantic graph creation
 ├── pipeline.py                   # End-to-end retrieval orchestrator
 ├── complexity_analysis.py        # Benchmarking and complexity analysis
-├── generate_test_data.py         # Synthetic test PDF generation
+├── generate_test_data.py         # Synthetic test PDF generator
 ├── ingest.py                     # Ingestion pipeline entry point
-├── app.py                        # Streamlit web interface
-├── llm.py                        # LLM answer generation
+├── app.py                        # Streamlit web interface and workspace dashboard
+├── llm.py                        # LLM interface and generation helper
+├── providers.py                  # Multi-provider LLM manager
+├── storage.py                    # SQLite DB for workspaces, documents, and chat history
+├── performance_tracker.py        # Thread-safe performance tracking system
+├── citation_verifier.py          # Inline citation verification
+├── claim_extractor.py            # Answer claim extraction
+├── claim_verifier.py             # Claim verification against sources
 └── requirements.txt              # Project dependencies
 ```
 
@@ -65,15 +100,15 @@ User Query
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.9 or higher
 - pip package manager
 
 ### Setup
 
 1. **Clone the repository**:
 ```bash
-git clone <repository-url>
-cd RAG
+git clone https://github.com/Revanth-3995/Adaptive-GraphRAG.git
+cd Adaptive-GraphRAG
 ```
 
 2. **Install dependencies**:
@@ -81,322 +116,77 @@ cd RAG
 pip install -r requirements.txt
 ```
 
-3. **Set up API key**:
-```bash
-# Windows
-set GROQ_API_KEY=your_api_key_here
-
-# Linux/Mac
-export GROQ_API_KEY=your_api_key_here
+3. **Configure Environment**:
+Create a `.env` file in the root directory:
+```env
+# Supported LLM Keys (Configure at least one)
+GROQ_API_KEY=your_groq_api_key
+OPENAI_API_KEY=your_openai_api_key
+GEMINI_API_KEY=your_gemini_api_key
+CLAUDE_API_KEY=your_anthropic_api_key
 ```
 
 ## 📖 Usage
 
-### Step 1: Prepare Your Data
+### Running the Dashboard UI
 
-Place your PDF documents in the `data/` directory:
-```bash
-data/
-├── document1.pdf
-├── document2.pdf
-└── ...
-```
-
-Or generate synthetic test data:
-```bash
-python generate_test_data.py
-```
-
-### Step 2: Ingest Documents
-
-Run the ingestion pipeline (one-time per document):
-```bash
-python ingest.py data/your_document.pdf
-```
-
-This process:
-- Chunks the PDF into overlapping text pieces
-- Generates semantic embeddings
-- Builds FAISS vector index
-- Builds BM25 keyword index
-- Creates semantic knowledge graph
-
-**Output**:
-- `graph/chunk_store.json` - Document chunks
-- `embeddings/embeddings.npy` - Embedding vectors
-- `embeddings/faiss.index` - FAISS index
-- `graph/bm25_index.pkl` - BM25 index
-- `graph/graph.pkl` - Knowledge graph
-
-### Step 3: Run the Application
-
-Launch the web interface:
+Launch the Streamlit web interface:
 ```bash
 streamlit run app.py
 ```
 
-The application will open in your browser at `http://localhost:8501`
+The application will open in your browser at `http://localhost:8501`.
 
-### Step 4: Query Your Documents
+Inside the Dashboard:
+1. **Workspace Management**: Create isolated workspaces or select an existing one.
+2. **Document Ingestion**: Upload PDF documents in the sidebar. The UI will show real-time progress bars for chunking, embedding, indexing, and graph-building steps.
+3. **Interactive Chat**: Query your workspace. Select between **FAST** and **VERIFIED** modes in the configuration settings.
+4. **Answer Diagnostics**: Expand details to inspect the **Grounding Score**, **Trust Level**, **Hallucination Risk**, and detailed claims analysis.
+5. **Performance Insights**: View a visual breakdown of execution latencies per stage (retrieval, generation, verification) to identify system bottlenecks.
 
-1. Enter your question in the text input
-2. Adjust retrieval parameters (optional):
-   - Initial Top-K: Number of candidates from each method
-   - Graph Depth: Depth for graph traversal
-   - Final Top-K: Number of final results
-3. Click "Search"
-4. View the generated answer and retrieved context
+### CLI Ingestion Pipeline
 
-## 💻 Programmatic Usage
-
-```python
-from pipeline import RetrievalPipeline
-
-# Initialize pipeline
-pipeline = RetrievalPipeline(
-    bm25_weight=0.3,
-    vector_weight=0.5,
-    graph_weight=0.2,
-    graph_depth=1,
-    use_bfs=True
-)
-
-# Load components
-pipeline.load()
-
-# Retrieve relevant chunks
-results = pipeline.retrieve(
-    query="What are the key features of the project?",
-    top_k_initial=10,
-    top_k_final=5
-)
-
-# View results
-for chunk, score in results:
-    print(f"Score: {score:.4f}")
-    print(f"Source: {chunk['source_filename']} (Page {chunk['page_number']})")
-    print(f"Text: {chunk['text'][:200]}...\n")
+To ingest a document via the command line:
+```bash
+python ingest.py path/to/document.pdf
 ```
 
-## 🔧 Configuration
+This constructs and persists:
+- `graph/chunk_store.json` (Document chunks)
+- `embeddings/embeddings.npy` (Dense vectors)
+- `embeddings/faiss.index` (FAISS similarity index)
+- `graph/bm25_index.pkl` (BM25 lexical index)
+- `graph/graph.pkl` (Knowledge graph object)
 
-### Retrieval Weights
+### Running Performance Benchmarks
 
-Adjust the importance of each retrieval method in `pipeline.py` or via the UI:
-
-- **BM25 Weight**: 0.3 (keyword matching)
-- **Vector Weight**: 0.5 (semantic matching)
-- **Graph Weight**: 0.2 (context expansion)
-
-### Chunking Parameters
-
-Modify in `ingest.py`:
-
-```python
-chunker = DocumentChunker(
-    chunk_size_words=200,  # Words per chunk
-    overlap_words=50       # Overlap between chunks
-)
-```
-
-### Graph Threshold
-
-Adjust in `graph_builder.py`:
-
-```python
-# Edge creation threshold (cosine similarity)
-SIMILARITY_THRESHOLD = 0.7
-```
-
-## 📊 Performance Analysis
-
-Run complexity benchmarks:
-
+To analyze the complexity and latency of the system components:
 ```bash
 python complexity_analysis.py
 ```
+This output is saved to `graph/complexity_report.json`.
 
-This generates a detailed report with:
-- Ingestion timing (chunking, embedding, indexing)
-- Retrieval timing (BM25, FAISS, graph, fusion, reranking)
-- System statistics (chunk count, graph size, etc.)
-
-Output: `complexity_report.json`
+To run the automated performance audit:
+```bash
+python evaluation/performance_audit.py
+```
 
 ## 🧪 Testing
 
-Generate synthetic test documents:
-
+To run the unit tests for the Answer Intelligence layer:
 ```bash
-# Single test PDF
-python generate_test_data.py
-
-# Multiple test PDFs
-python -c "
-from generate_test_data import TestDataGenerator
-generator = TestDataGenerator()
-generator.generate_multiple_test_pdfs('data', num_pdfs=3)
-"
+pytest evaluation/test_answer_intelligence.py
 ```
-
-## 📚 How It Works
-
-### Ingestion Pipeline
-
-1. **Chunking**: Split PDF into overlapping text chunks
-2. **Embedding**: Convert chunks to 384-dimensional vectors
-3. **FAISS Index**: Build efficient vector similarity index
-4. **BM25 Index**: Build keyword-based search index
-5. **Graph Building**: Create semantic knowledge graph
-
-### Retrieval Pipeline
-
-1. **BM25 Search**: Find exact keyword matches
-2. **Vector Search**: Find semantically similar chunks
-3. **Graph Traversal**: Expand context via graph neighbors
-4. **Result Fusion**: Combine and normalize scores
-5. **Reranking**: Refine with Cross-Encoder for precision
-
-### Scoring
-
-- **BM25 Score**: Keyword relevance (unbounded)
-- **Vector Score**: Semantic similarity (-1 to 1)
-- **Graph Score**: Proximity to seeds (0 to 0.9)
-- **Fusion Score**: Weighted combination (0 to 1)
-- **Reranker Score**: Deep attention relevance (0 to 1)
-
-## 🎯 Use Cases
-
-- **Document Q&A**: Answer questions from technical documentation
-- **Research Assistance**: Find relevant information across papers
-- **Knowledge Base**: Build searchable knowledge repositories
-- **Legal/Medical**: Retrieve precise information from domain documents
-- **Technical Support**: Find solutions in documentation
 
 ## 🔬 Technical Details
 
-### Models
-
-- **Embedding**: `all-MiniLM-L6-v2` (384 dimensions)
+### Models & Libraries
+- **Embeddings**: `all-MiniLM-L6-v2` (384-dimensional dense vectors)
 - **Reranker**: `cross-encoder/ms-marco-MiniLM-L-6-v2`
-- **LLM**: Groq API (LLaMA models)
-
-### Algorithms
-
-- **BM25**: Best Matching 25 ranking function
-- **FAISS**: Facebook AI Similarity Search (IndexFlatIP)
-- **Graph**: NetworkX with cosine similarity edges
-- **Fusion**: Min-Max normalization with weighted sum
-
-### Complexity
-
-- **Ingestion**: O(N²) for graph building (dominant factor)
-- **Retrieval**: O(N) for BM25/FAISS, O(V+E) for graph
-- **Reranking**: O(K) where K is candidates (typically 20)
-
-## 🛠️ Development
-
-### Adding New Retrieval Methods
-
-1. Create new module in `retrieval/`
-2. Implement search interface
-3. Add to `fusion.py` weights
-4. Update `pipeline.py` to include new method
-
-### Modifying Graph Construction
-
-Edit `graph_builder.py`:
-- Adjust similarity threshold
-- Change edge weight calculation
-- Add node attributes
-
-### Custom LLM Integration
-
-Edit `llm.py`:
-- Replace Groq API with your provider
-- Adjust prompt template
-- Modify response parsing
-
-## 📝 Documentation
-
-For detailed technical documentation, see:
-- [SYSTEM_REPORT.md](SYSTEM_REPORT.md) - Comprehensive technical report
-- Code comments - Inline documentation
-- Docstrings - Function/class documentation
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## 📄 License
-
-This project is provided as-is for educational and research purposes.
-
-## 🙏 Acknowledgments
-
-- **Sentence Transformers**: For embedding models
-- **FAISS**: For efficient vector search
-- **Rank BM25**: For keyword retrieval
-- **NetworkX**: For graph operations
-- **Streamlit**: For the web interface
-- **Groq**: For LLM API
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Import Error**: Ensure all dependencies are installed
-```bash
-pip install -r requirements.txt
-```
-
-**API Key Error**: Set GROQ_API_KEY environment variable
-```bash
-set GROQ_API_KEY=your_key
-```
-
-**FAISS Error**: Ensure embeddings.npy exists (run ingestion first)
-```bash
-python ingest.py data/your_document.pdf
-```
-
-**Memory Error**: Reduce chunk size or use smaller documents
-```python
-chunker = DocumentChunker(chunk_size_words=100)  # Smaller chunks
-```
-
-## 📈 Performance Tips
-
-1. **Use GPU**: Enable GPU for FAISS if available
-2. **Approximate Search**: Use HNSW instead of IndexFlatIP for large datasets
-3. **Limit Graph Depth**: Reduce graph traversal depth for faster queries
-4. **Cache Queries**: Implement caching for frequent queries
-5. **Batch Processing**: Process multiple documents in batches
-
-## 🔮 Future Enhancements
-
-- [ ] Approximate FAISS indices (HNSW, IVF)
-- [ ] Query expansion and understanding
-- [ ] Dynamic weight adjustment
-- [ ] Multi-document support
-- [ ] Real-time index updates
-- [ ] Evaluation metrics (precision, recall)
-- [ ] User feedback integration
-- [ ] Multi-modal support (images, tables)
-
-## 📞 Support
-
-For issues, questions, or contributions:
-- Open an issue on GitHub
-- Check existing documentation
-- Review code comments
+- **Graph Utility**: NetworkX with custom similarity-based edge construction
+- **Vector Search**: FAISS (Facebook AI Similarity Search)
+- **Database**: SQLite for thread-safe metadata and chat persistence
+- **GUI Components**: Streamlit for dashboard rendering, PyVis for interactive graph visualization
 
 ---
-
 **Built with ❤️ for intelligent document retrieval**

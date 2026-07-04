@@ -1,3 +1,4 @@
+# NOTE: This module contains Experimental / Advanced Features that are currently disabled from the standard user-facing product experience.
 import re
 import os
 import json
@@ -12,6 +13,29 @@ class CitationVerifier:
     def __init__(self):
         # Match patterns like [Source X], [Source X: filename.pdf, Page Y], or [filename.pdf, Page Y]
         self.citation_pattern = re.compile(r'\[([^\]]+)\]')
+
+    def is_likely_citation(self, content: str, chunks: List[Dict[str, Any]]) -> bool:
+        """Determines if the bracket content is likely a citation or array/math index."""
+        content_clean = content.strip()
+        # 1. Contains "Source" followed by a number
+        if re.search(r'Source\s+\d+', content_clean, re.IGNORECASE):
+            return True
+        # 2. Contains a file extension like .pdf or .txt
+        if re.search(r'\.(pdf|PDF|txt|TXT|docx|DOCX|xlsx|XLSX|csv|CSV|json|JSON|pkl|PKL)', content_clean):
+            return True
+        # 3. Contains "Page" followed by a number
+        if re.search(r'Page\s*\d+', content_clean, re.IGNORECASE):
+            return True
+        # 4. Matches any of the active chunk source filenames
+        content_lower = content_clean.lower()
+        for chunk in chunks:
+            filename = chunk.get("source_filename", "")
+            if filename:
+                filename_lower = filename.lower()
+                if filename_lower in content_lower or content_lower in filename_lower:
+                    if len(content_lower) > 3:
+                        return True
+        return False
 
     def parse_citations(self, text: str) -> List[str]:
         """Extracts all inline bracketed citations from the text."""
@@ -47,6 +71,10 @@ class CitationVerifier:
             nonlocal verified_count, failed_count
             full_content = match.group(1).strip()
             full_bracket = match.group(0)
+            
+            # Skip if this is a math/array index rather than a source citation
+            if not self.is_likely_citation(full_content, chunks):
+                return full_bracket
             
             is_verified = False
             ref_details = {}

@@ -1,5 +1,10 @@
+import sys
+# Mask tensorflow to prevent import conflicts with streamlit's protobuf requirements
+sys.modules['tensorflow'] = None
+
 from typing import List, Dict, Any, Tuple
 from sentence_transformers import CrossEncoder
+
 
 
 class Reranker:

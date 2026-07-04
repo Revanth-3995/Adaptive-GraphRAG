@@ -1,8 +1,13 @@
 import os
+import sys
+# Mask tensorflow to prevent import conflicts with streamlit's protobuf requirements
+sys.modules['tensorflow'] = None
+
 import json
 import numpy as np
 from typing import List, Dict, Any, Tuple
 from sentence_transformers import SentenceTransformer
+
 
 class Embedder:
     """
@@ -18,15 +23,30 @@ class Embedder:
     This is a fast, lightweight model that provides excellent semantic search quality 
     while keeping the dimensionality relatively low (384 dimensions). This balances 
     performance (speed) with accuracy.
+    
+    Uses a singleton pattern to ensure the model is loaded only once across all
+    components (pipeline, claim verifier, HyDE, etc.), preventing redundant
+    model loads especially during parallel claim verification.
     """
     
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls, model_name: str = "all-MiniLM-L6-v2"):
+        if cls._instance is None:
+            cls._instance = super(Embedder, cls).__new__(cls)
+        return cls._instance
+    
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        if Embedder._initialized:
+            return
         self.model_name = model_name
         print(f"Loading SentenceTransformer model: {self.model_name}...")
         self.model = SentenceTransformer(self.model_name)
         # Typically 384 for all-MiniLM-L6-v2
         self.embedding_dimension = self.model.get_sentence_embedding_dimension()
         print(f"Model loaded. Embedding dimension: {self.embedding_dimension}")
+        Embedder._initialized = True
         
     def generate_embeddings(self, chunks: List[Dict[str, Any]], batch_size: int = 32) -> np.ndarray:
         """

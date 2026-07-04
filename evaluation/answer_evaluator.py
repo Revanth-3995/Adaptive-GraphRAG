@@ -47,7 +47,7 @@ class AnswerEvaluator:
             print(f"\n[{idx}/{len(targets)}] Query: {question}")
             
             # Run pipeline
-            res = self.pipeline.answer_query(question)
+            res = self.pipeline.answer_query(question, mode="VERIFIED")
             generated_answer = res["answer"]
             grounding_score = res["grounding_score"]
             trust_level = res["trust_level"]

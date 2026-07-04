@@ -12,3 +12,7 @@ venv/
 *.index
 *.json
 *.pdf
+workspace.db
+app_backup.py
+scratch/
+

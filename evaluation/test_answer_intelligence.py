@@ -55,6 +55,15 @@ class TestAnswerIntelligence(unittest.TestCase):
         self.assertIn("[network_routing.pdf, Page 7] [Unverified]", res_4["verified_answer"])
         self.assertEqual(res_4["failed_count"], 1)
 
+        # Test Case 5: Math and Array Index Brackets (should be skipped by citation verifier)
+        ans_5 = "PresortElementUniqueness(A[0..n-1]): if A[i] == A[i+1] then return false."
+        res_5 = self.citation_verifier.verify_citations(ans_5, chunks)
+        self.assertNotIn("Unverified", res_5["verified_answer"])
+        self.assertNotIn("Verified", res_5["verified_answer"])
+        self.assertEqual(res_5["verified_count"], 0)
+        self.assertEqual(res_5["failed_count"], 0)
+        self.assertEqual(res_5["verified_answer"], ans_5)
+
     def test_claim_extraction_fallback(self):
         """Verify that the regex fallback splits sentences and cleans bullets correctly."""
         text = "- Bellman-Ford computes shortest paths.\n* Dijkstra is greedy.\n- Pronoun it is replaced."
@@ -116,9 +125,9 @@ class TestAnswerIntelligence(unittest.TestCase):
             self.claim_verifier._fallback_verify = mock_fallback
             report = self.claim_verifier.verify_claims(claims, chunks)
             
-            # Grounding = 1 supported / 3 total = 33.3%
-            self.assertEqual(report["grounding_score"], 33.3)
-            self.assertEqual(report["trust_level"], "UNTRUSTED")
+            # Grounding = (1 supported + 0.5 * 1 partial) / 3 total = 50.0%
+            self.assertEqual(report["grounding_score"], 50.0)
+            self.assertEqual(report["trust_level"], "LOW CONFIDENCE")
             self.assertEqual(report["hallucination_risk"], "HIGH")
             
             # Restore fallback

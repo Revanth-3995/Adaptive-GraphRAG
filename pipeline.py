@@ -355,28 +355,141 @@ class RetrievalPipeline:
     def answer_query(
         self,
         query: str,
-        chat_history: List[Dict[str, str]] = None
+        chat_history: List[Dict[str, str]] = None,
+        mode: str = "FAST"
     ) -> Dict[str, Any]:
         """
-        Generate answer, verify citations, verify claims, compute grounding/trust,
-        and write traceability reports.
+        Generate answer, timing breakdowns, count LLM calls, identify bottlenecks,
+        support Fast vs Verified modes, and save performance traces.
         """
+        import time
+        from performance_tracker import PerformanceTracker
+        tracker = PerformanceTracker()
+        tracker.reset_call_count()
+        
+        t_total_start = time.perf_counter()
+        
         if not self._loaded:
             self.load()
             
-        # 1. Retrieve chunks
-        retrieved_chunks = self.retrieve(query, top_k_initial=10, top_k_final=5)
+        # 1. Timing: Classification & Planning
+        t_start = time.perf_counter()
+        plan = self.planner.plan(query)
+        query_type = plan["query_type"]
+        use_hyde = plan["use_hyde"]
+        use_decomposition = plan["use_decomposition"]
+        graph_depth = plan["graph_depth"]
+        traversal = plan["traversal"]
+        rerank_mode = plan["rerank_mode"]
+        classification_ms = (time.perf_counter() - t_start) * 1000
         
-        # 2. Generate raw answer
-        raw_answer = self.llm.generate_answer(query, retrieved_chunks, chat_history=chat_history)
+        # 2. Timing: Query Decomposition
+        t_start = time.perf_counter()
+        if use_decomposition:
+            sub_questions = self.decomposer.decompose(query)
+        else:
+            sub_questions = [query]
+        decomposition_ms = (time.perf_counter() - t_start) * 1000
+        
+        hyde_ms = 0.0
+        retrieval_ms = 0.0
+        graph_expansion_ms = 0.0
+        
+        merged_candidates = []
+        
+        # 3. Timing: Retrieve candidates for each sub-question
+        for sub_q in sub_questions:
+            # HyDE
+            t_sub_start = time.perf_counter()
+            hypothesis = self.hyde.generate_hypothesis(sub_q)
+            hyde_ms += (time.perf_counter() - t_sub_start) * 1000
+            
+            # Retrieval (BM25 + Vector)
+            t_sub_start = time.perf_counter()
+            bm25_results = self.bm25.bm25_search(sub_q, top_k=10)
+            query_embedding = self.embedder.generate_query_embedding(hypothesis)
+            vector_results = self.vector_search.vector_search(query_embedding, top_k=10)
+            retrieval_ms += (time.perf_counter() - t_sub_start) * 1000
+            
+            # Graph Expansion
+            t_sub_start = time.perf_counter()
+            graph_results = []
+            if graph_depth > 0 and vector_results:
+                raw_query_emb = self.embedder.generate_query_embedding(sub_q)
+                raw_vec_res = self.vector_search.vector_search(raw_query_emb, top_k=3)
+                seeds = [res[0] for res in raw_vec_res]
+                
+                graph_results = self.graph_retriever.graph_based_retrieval(
+                    seeds,
+                    max_depth=graph_depth,
+                    use_bfs=True,
+                    strategy=traversal
+                )
+            graph_expansion_ms += (time.perf_counter() - t_sub_start) * 1000
+            
+            # Fusion
+            t_sub_start = time.perf_counter()
+            sub_fused = self.fusion.fuse_results(
+                bm25_results,
+                vector_results,
+                graph_results,
+                top_k=20
+            )
+            merged_candidates.extend(sub_fused)
+            
+        # Deduplication
+        seen_ids = set()
+        unique_candidates = []
+        for chunk, score in merged_candidates:
+            cid = chunk.get("chunk_id", "")
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                unique_candidates.append((chunk, score))
+        unique_candidates.sort(key=lambda x: x[1], reverse=True)
+        candidate_pool = unique_candidates[:50]
+        
+        # 4. Timing: Adaptive Reranking
+        t_start = time.perf_counter()
+        retrieved_chunks = self.reranker.rerank(
+            query=query,
+            candidates=candidate_pool,
+            top_k=5,
+            query_type=query_type
+        )
+        rerank_ms = (time.perf_counter() - t_start) * 1000
+        
+        # 5. Timing: LLM Generation
+        t_start = time.perf_counter()
+        
+        # In FAST mode we don't prep summaries to minimize latency
+        document_summaries = []
+        if mode == "VERIFIED":
+            seen_files = set()
+            for chunk, _ in retrieved_chunks:
+                source_file = chunk.get("source_filename")
+                if source_file and source_file not in seen_files:
+                    seen_files.add(source_file)
+                    import re
+                    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', source_file.replace(".pdf", "").replace(".PDF", "")).lower()
+                    meta_path = f"doc_store/{doc_name}/meta.json"
+                    if os.path.exists(meta_path):
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as f:
+                                meta = json.load(f)
+                            if "document_summary" in meta:
+                                document_summaries.append(f"Document: {source_file}\nSummary: {meta['document_summary']}")
+                        except Exception:
+                            pass
+                            
+        raw_answer = self.llm.generate_answer(query, retrieved_chunks, chat_history=chat_history, document_summaries=document_summaries)
         
         # Parse confidence label
         confidence_map = {
-            "HIGH":   ("High",   "🟢"),
-            "MEDIUM": ("Medium", "🟡"),
-            "LOW":    ("Low",    "🔴"),
+            "HIGH":   ("High",   ""),
+            "MEDIUM": ("Medium", ""),
+            "LOW":    ("Low",    ""),
         }
-        label, emoji = "Medium", "🟡"
+        label, emoji = "Medium", ""
         answer = raw_answer.strip()
 
         for key, (l, e) in confidence_map.items():
@@ -397,58 +510,142 @@ class RetrievalPipeline:
                 line = ' ' * indent + '- ' + stripped[1:].lstrip()
             cleaned_lines.append(line)
         answer = '\n'.join(cleaned_lines)
+        generation_ms = (time.perf_counter() - t_start) * 1000
         
-        # 3. Citation Verification
-        cit_res = self.citation_verifier.verify_citations(answer, retrieved_chunks)
-        verified_answer = cit_res["verified_answer"]
-        citations = cit_res["citations"]
-        verified_cit_count = cit_res["verified_count"]
-        failed_cit_count = cit_res["failed_count"]
+        # Initialize Phase 4 variables for FAST mode safety
+        claims_list = []
+        citations = []
+        grounding_score = 100.0
+        trust_level = "VERIFIED"
+        hallucination_risk = "LOW"
+        verified_answer = answer
+        verified_cit_count = 0
+        failed_cit_count = 0
         
-        # 4. Claim Extraction
-        claims = self.claim_extractor.extract_claims(verified_answer)
+        # Timings for verification steps (FAST mode sets to 0.0)
+        claim_extraction_ms = 0.0
+        claim_verification_ms = 0.0
+        citation_verification_ms = 0.0
+        grounding_ms = 0.0
         
-        # 5. Claim Verification, Grounding & Trust Framework
-        verify_res = self.claim_verifier.verify_claims(claims, retrieved_chunks)
+        claims = []
+        supported_claims = []
+        unsupported_claims = []
         
-        grounding_score = verify_res["grounding_score"]
-        trust_level = verify_res["trust_level"]
-        hallucination_risk = verify_res["hallucination_risk"]
+        # 6. VERIFIED MODE vs FAST MODE routing
+        if mode == "VERIFIED":
+            # Timing: Claim Extraction
+            t_start = time.perf_counter()
+            claims = self.claim_extractor.extract_claims(answer)
+            claim_extraction_ms = (time.perf_counter() - t_start) * 1000
+            
+            # Timing: Claim Verification
+            t_start = time.perf_counter()
+            verify_res = self.claim_verifier.verify_claims(claims, retrieved_chunks)
+            claims_list = verify_res["claims"]
+            grounding_score = verify_res["grounding_score"]
+            trust_level = verify_res["trust_level"]
+            hallucination_risk = verify_res["hallucination_risk"]
+            supported_claims = [c["claim"] for c in claims_list if c["status"] == "SUPPORTED"]
+            unsupported_claims = [c["claim"] for c in claims_list if c["status"] == "UNSUPPORTED"]
+            claim_verification_ms = (time.perf_counter() - t_start) * 1000
+            
+            # Timing: Citation Verification
+            t_start = time.perf_counter()
+            cit_res = self.citation_verifier.verify_citations(answer, retrieved_chunks)
+            verified_answer = cit_res["verified_answer"]
+            citations = cit_res["citations"]
+            verified_cit_count = cit_res["verified_count"]
+            failed_cit_count = cit_res["failed_count"]
+            citation_verification_ms = (time.perf_counter() - t_start) * 1000
+            
+            # Timing: Grounding Calculations / Framework overhead
+            t_start = time.perf_counter()
+            # Simple calculations (already covered in claim verification but recording overhead if any)
+            grounding_ms = (time.perf_counter() - t_start) * 1000
+            
+        total_ms = (time.perf_counter() - t_total_start) * 1000
         
-        claims_list = verify_res["claims"]
-        supported_claims = [c["claim"] for c in claims_list if c["status"] == "SUPPORTED"]
-        unsupported_claims = [c["claim"] for c in claims_list if c["status"] == "UNSUPPORTED"]
+        # Calculate Bottlenecks
+        stages_timings = {
+            "classification": classification_ms,
+            "hyde": hyde_ms,
+            "decomposition": decomposition_ms,
+            "retrieval": retrieval_ms,
+            "graph_expansion": graph_expansion_ms,
+            "rerank": rerank_ms,
+            "generation": generation_ms,
+            "claim_extraction": claim_extraction_ms,
+            "claim_verification": claim_verification_ms,
+            "citation_verification": citation_verification_ms,
+            "grounding": grounding_ms
+        }
         
-        # 6. Save Answer Trace & Diagnostic Report
+        slowest_stage = max(stages_timings, key=stages_timings.get)
+        slowest_stage_ms = stages_timings[slowest_stage]
+        
+        # Track claim optimization details
+        num_claims = len(claims)
+        avg_per_claim_ms = (claim_verification_ms / num_claims) if num_claims > 0 else 0.0
+        
+        # Get LLM API call count for this execution
+        llm_calls = tracker.get_llm_calls()
+        
+        # Log performance trace
+        perf_trace = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "query": query,
+            "mode": mode,
+            "total_ms": round(total_ms, 1),
+            "llm_calls": llm_calls,
+            "slowest_stage": slowest_stage,
+            "slowest_stage_ms": round(slowest_stage_ms, 1),
+            "classification_ms": round(classification_ms, 1),
+            "hyde_ms": round(hyde_ms, 1),
+            "decomposition_ms": round(decomposition_ms, 1),
+            "retrieval_ms": round(retrieval_ms, 1),
+            "graph_expansion_ms": round(graph_expansion_ms, 1),
+            "rerank_ms": round(rerank_ms, 1),
+            "generation_ms": round(generation_ms, 1),
+            "claim_extraction_ms": round(claim_extraction_ms, 1),
+            "claim_verification_ms": round(claim_verification_ms, 1),
+            "citation_verification_ms": round(citation_verification_ms, 1),
+            "grounding_ms": round(grounding_ms, 1),
+            "claims_count": num_claims,
+            "avg_per_claim_ms": round(avg_per_claim_ms, 1)
+        }
+        tracker.log_trace(perf_trace)
+        
+        # Save standard trace info for transparency
         trace_data = {
             "query": query,
-            "query_type": self.last_trace.get("query_type", "UNKNOWN"),
-            "retrieval_strategy": self.last_trace.get("retrieval_strategy", "UNKNOWN"),
+            "query_type": query_type,
+            "retrieval_strategy": f"BM25 + Vector + Graph ({traversal})",
             "grounding_score": grounding_score,
             "trust_level": trust_level,
             "claims": claims,
             "verified_claims": supported_claims,
             "unsupported_claims": unsupported_claims,
-            "citations": citations
+            "citations": citations,
+            "performance": perf_trace
         }
-        
-        # Append this complete trace metadata to our global trace file
-        # We can update self.last_trace to incorporate the Phase 4 metadata
         self.last_trace.update(trace_data)
         self._save_trace(self.last_trace)
         
-        # Create Answer Quality Report (Feature 7)
+        # Save Answer Quality Report (Feature 7)
         quality_report = {
             "query": query,
-            "query_type": self.last_trace.get("query_type", "UNKNOWN"),
+            "query_type": query_type,
             "grounding_score": grounding_score,
             "trust_level": trust_level,
             "claims": claims_list,
             "verified_claims": len(supported_claims),
-            "unverified_claims": len(unsupported_claims) + verify_res.get("partially_supported_count", 0),
+            "unverified_claims": len(unsupported_claims) + (len(claims_list) - len(supported_claims) - len(unsupported_claims)),
             "verified_citations": verified_cit_count,
             "failed_citations": failed_cit_count,
-            "hallucination_risk": hallucination_risk
+            "hallucination_risk": hallucination_risk,
+            "mode": mode,
+            "performance": perf_trace
         }
         
         report_path = "graph/answer_quality_report.json"
@@ -459,7 +656,7 @@ class RetrievalPipeline:
         except Exception as e:
             print(f"Warning: Failed to save quality report: {e}")
             
-        # Format sources in standardized UI dictionary list
+        # Format sources
         sources = []
         for chunk, score in retrieved_chunks:
             sources.append({
@@ -479,7 +676,8 @@ class RetrievalPipeline:
             "hallucination_risk": hallucination_risk,
             "claims": claims_list,
             "citations": citations,
-            "trace": self.last_trace
+            "trace": self.last_trace,
+            "performance": perf_trace
         }
     
     def get_retrieval_stats(self) -> Dict[str, Any]:

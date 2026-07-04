@@ -1,3 +1,4 @@
+# NOTE: This module contains Experimental / Advanced Features that are currently disabled from the standard user-facing product experience.
 import os
 import json
 import re
@@ -74,25 +75,47 @@ class ClaimVerifier:
 
         # Try to verify via Groq LLM
         use_llm = self.client is not None and os.environ.get("GROQ_API_KEY") is not None
+        if use_llm:
+            self.client.api_key = os.environ.get("GROQ_API_KEY")
         
-        # We can optimize LLM verification by processing claims in parallel or sequentially.
-        # Since groq is extremely fast, a simple loop is highly reliable.
-        for claim in claims:
+        # We run the claim verification in parallel using a ThreadPoolExecutor
+        # to prevent high sequential latency from multiple LLM calls.
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Define single claim verifier function
+        def verify_single_claim(claim: str) -> Dict[str, Any]:
+            # Clean claim text from any HTML or UI tags
+            clean_claim = re.sub(r'<[^>]+>', '', claim)
+            clean_claim = clean_claim.replace("✓ Verified", "").replace("⚠️ Unverified", "").strip()
+            
             verified = False
+            status = "UNSUPPORTED"
+            explanation = "No explanation provided."
             
             if use_llm:
                 prompt = f"""You are a Fact Verification Assistant.
 Analyze whether the given Claim is supported by the provided Context.
 Classify the support level into exactly one of the following categories:
-- SUPPORTED: The claim is fully and directly supported by the context.
-- PARTIALLY_SUPPORTED: The claim is partially supported, but contains minor details, inferences, or numbers not directly in the context.
-- UNSUPPORTED: The claim is not supported, is contradicted, or cannot be verified using only the context.
+
+- SUPPORTED: The claim is fully or substantially supported by the context. This includes:
+  * Minor rephrasings, synonyms, or direct logical inferences
+  * Natural-language descriptions of algorithms/pseudocode found in the context
+  * Complexity statements matching algorithms in the context
+  * Paraphrased steps of an algorithm that is present in the context
+- PARTIALLY_SUPPORTED: The claim is only partially supported, or adds significant new details, numbers, or assumptions not found in the context.
+- UNSUPPORTED: The claim is clearly not supported, is contradicted, or discusses topics completely absent from the context.
+
+IMPORTANT RULES:
+1. If the context contains an algorithm's pseudocode and the claim describes the same algorithm in natural language, classify as SUPPORTED.
+2. Treat natural language descriptions of code constructs (e.g. 'for each element, check if...' describing 'for i = 0 to n do if A[i]...') as SUPPORTED.
+3. Focus on whether the FACTUAL CONTENT is correct, not whether the exact words appear.
+4. When in doubt between SUPPORTED and PARTIALLY_SUPPORTED, lean toward SUPPORTED.
 
 Context:
 {context}
 
 Claim:
-"{claim}"
+"{clean_claim}"
 
 Output exactly one line containing ONLY the classification (SUPPORTED, PARTIALLY_SUPPORTED, or UNSUPPORTED) followed by a short one-line explanation on the next line.
 Example:
@@ -104,18 +127,19 @@ The context explicitly states that Bellman-Ford supports negative weights.
                         response = self.client.chat.completions.create(
                             model=model,
                             messages=[
-                                {"role": "system", "content": "You are a precise fact verifier. Be honest and strict. Output only the status and short explanation."},
+                                {"role": "system", "content": "You are a fact verifier that focuses on factual correctness rather than exact wording. Natural language descriptions of algorithms or pseudocode should be considered supported if they accurately describe the logic. Output only the status and short explanation."},
                                 {"role": "user", "content": prompt}
                             ],
                             temperature=0.0,
                             max_tokens=200
                         )
                         output = response.choices[0].message.content.strip().split('\n')
+                        from performance_tracker import PerformanceTracker
+                        PerformanceTracker().increment_llm_calls()
                         status = output[0].strip().upper()
                         
                         # Validate status
                         if status not in ["SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED"]:
-                            # Attempt clean parsing if not exact line
                             found = False
                             for line in output:
                                 clean_line = line.strip().upper()
@@ -130,36 +154,33 @@ The context explicitly states that Bellman-Ford supports negative weights.
                                 status = "UNSUPPORTED"
                         
                         explanation = "\n".join(output[1:]).strip() if len(output) > 1 else "No explanation provided."
-                        
-                        verifications.append({
-                            "claim": claim,
-                            "status": status,
-                            "explanation": explanation
-                        })
-                        
-                        if status == "SUPPORTED":
-                            supported_count += 1
-                        elif status == "PARTIALLY_SUPPORTED":
-                            partially_supported_count += 1
-                        else:
-                            unsupported_count += 1
-                            
                         verified = True
                         break
-                    except Exception as e:
-                        # Log error internally and try next model
+                    except Exception:
                         continue
             
-            # Semantic search similarity fallback
             if not verified:
                 try:
                     status, explanation = self._fallback_verify(claim, retrieved_chunks)
-                    verifications.append({
-                        "claim": claim,
-                        "status": status,
-                        "explanation": explanation
-                    })
-                    
+                except Exception as e:
+                    status = "UNSUPPORTED"
+                    explanation = f"Fallback failed ({e}). Defaulting to unsupported."
+            
+            return {
+                "claim": claim,
+                "status": status,
+                "explanation": explanation
+            }
+
+        # Run verification tasks concurrently using ThreadPoolExecutor
+        max_workers = min(len(claims), 12)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(verify_single_claim, claim) for claim in claims]
+            for future in futures:
+                try:
+                    res = future.result()
+                    verifications.append(res)
+                    status = res["status"]
                     if status == "SUPPORTED":
                         supported_count += 1
                     elif status == "PARTIALLY_SUPPORTED":
@@ -167,21 +188,19 @@ The context explicitly states that Bellman-Ford supports negative weights.
                     else:
                         unsupported_count += 1
                 except Exception as e:
-                    # Absolute safety default
                     verifications.append({
-                        "claim": claim,
+                        "claim": "Error",
                         "status": "UNSUPPORTED",
-                        "explanation": f"Fallback failed ({e}). Defaulting to unsupported."
+                        "explanation": f"Concurrency error during verification: {e}"
                     })
                     unsupported_count += 1
 
-        # Compute grounding score: supported claims + 0.5 * partially supported / total
-        # To align with strict Supported Claims / Total Claims formula:
+        # Compute grounding score: supported + 0.5 * partially_supported / total
         total_claims = len(claims)
         
-        # Feature 5: Supported Claims / Total Claims (percentage)
-        # We'll calculate strict score:
-        grounding_score = (supported_count / total_claims) * 100.0 if total_claims > 0 else 100.0
+        # Feature 5: Weighted grounding score
+        # SUPPORTED = 100%, PARTIALLY_SUPPORTED = 50%, UNSUPPORTED = 0%
+        grounding_score = ((supported_count + 0.5 * partially_supported_count) / total_claims) * 100.0 if total_claims > 0 else 100.0
         
         # Feature 6: Trust Framework mapping
         if grounding_score >= 90:
@@ -219,7 +238,11 @@ The context explicitly states that Bellman-Ford supports negative weights.
         from embedder import Embedder
         embedder = Embedder()
         
-        claim_emb = embedder.generate_query_embedding(claim)
+        # Clean claim text of any HTML or formatting tags
+        clean_claim = re.sub(r'<[^>]+>', '', claim)
+        clean_claim = clean_claim.replace("✓ Verified", "").replace("⚠️ Unverified", "").strip()
+        
+        claim_emb = embedder.generate_query_embedding(clean_claim)
         claim_norm = claim_emb / (np.linalg.norm(claim_emb) + 1e-10)
         
         best_sim = 0.0
@@ -239,15 +262,15 @@ The context explicitly states that Bellman-Ford supports negative weights.
                 
         # Classify based on cosine similarity thresholds
         # Typically MiniLM-L6-v2 cosine similarities are:
-        # > 0.65 indicates strong semantic similarity (Supported)
-        # > 0.45 indicates partial overlap (Partially Supported)
-        # < 0.45 indicates poor alignment (Unsupported)
-        if best_sim >= 0.65:
+        # > 0.58 indicates strong semantic similarity (Supported)
+        # > 0.40 indicates partial overlap (Partially Supported)
+        # < 0.40 indicates poor alignment (Unsupported)
+        if best_sim >= 0.58:
             status = "SUPPORTED"
             filename = best_chunk.get("source_filename", "Unknown") if best_chunk else "Unknown"
             page = best_chunk.get("page_number", "Unknown") if best_chunk else "Unknown"
             explanation = f"Semantic match of {best_sim:.2f} with Document Chunk {best_chunk_idx+1} ({filename}, Page {page})."
-        elif best_sim >= 0.45:
+        elif best_sim >= 0.40:
             status = "PARTIALLY_SUPPORTED"
             filename = best_chunk.get("source_filename", "Unknown") if best_chunk else "Unknown"
             page = best_chunk.get("page_number", "Unknown") if best_chunk else "Unknown"

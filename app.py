@@ -1,9 +1,19 @@
+# -*- coding: utf-8 -*-
+import sys
+# Mask tensorflow to prevent import conflicts with streamlit's protobuf requirements
+sys.modules['tensorflow'] = None
+
 import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 import json
 import numpy as np
 import streamlit as st
 import shutil
 import re
+import pickle
+import time
 from datetime import datetime
 
 from embedder import Embedder
@@ -24,189 +34,462 @@ from citation_verifier import CitationVerifier
 from claim_extractor import ClaimExtractor
 from claim_verifier import ClaimVerifier
 
+# Workspace database & providers
+from storage import Database
+from providers import MultiProviderManager, get_provider_health_stats
+
 # -----------------------------------------------------------------------------
 # 2. PAGE CONFIG
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="GraphRAG", layout="wide")
+import base64
 
+st.set_page_config(
+    page_title="GraphRAG Workspace",
+    page_icon="logo.png",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# -----------------------------------------------------------------------------
-# 3. HELPER: get_existing_docs()
-# -----------------------------------------------------------------------------
-def get_existing_docs() -> list:
-    """Scans doc_store/ for ready docs and returns their doc_names."""
-    if not os.path.exists("doc_store"):
-        os.makedirs("doc_store", exist_ok=True)
-    ready_docs = []
-    for doc_name in os.listdir("doc_store"):
-        meta_path = f"doc_store/{doc_name}/meta.json"
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                if meta.get("status") == "ready":
-                    ready_docs.append(doc_name)
-            except Exception:
-                pass
-    return ready_docs
-
-
-# -----------------------------------------------------------------------------
-# 4. HELPER: ingest_pdf(uploaded_file)
-# -----------------------------------------------------------------------------
-def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text) -> dict:
-    """Same as ingest_pdf but updates a progress bar at each step."""
-    filename = uploaded_file.name
-    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', filename.replace(".pdf", "")).lower()
-    doc_path = f"doc_store/{doc_name}"
-    os.makedirs(doc_path, exist_ok=True)
-
+# Load base64 logo for HTML rendering
+def load_base64_logo():
     try:
-        # Step 1 — Save PDF
-        source_path = f"{doc_path}/source.pdf"
-        with open(source_path, "wb") as f:
-            f.write(uploaded_file.getvalue())
+        with open("logo.png", "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return ""
 
-        # Step 2 — Chunk
-        status_text.text("📄 Step 2/5: Chunking document...")
-        progress_bar.progress(20, text="Chunking document...")
-        chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
-        chunks = chunker.process_pdf(source_path)
-        for chunk in chunks:
-            chunk["source_filename"] = filename
-        with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
-            json.dump(chunks, f, ensure_ascii=False)
+base64_logo = load_base64_logo()
 
-        # Step 3 — Embed
-        status_text.text("🔢 Step 3/5: Generating embeddings...")
-        progress_bar.progress(45, text="Generating embeddings...")
-        embedder = get_shared_models()["embedder"]
-        embeddings = embedder.generate_embeddings(chunks)
-        np.save(f"{doc_path}/embeddings.npy", embeddings)
+# -----------------------------------------------------------------------------
+# 3. CUSTOM CSS - ChatGPT-like Dark Theme with Glassmorphism
+# -----------------------------------------------------------------------------
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-        # Step 4 — FAISS + BM25
-        status_text.text("🔍 Step 4/5: Building search indexes...")
-        progress_bar.progress(65, text="Building search indexes...")
-        vs = VectorSearch()
-        vs.build_faiss_index(chunks, embeddings)
-        vs.save_index(
-            index_path=f"{doc_path}/faiss.index",
-            chunks_path=f"{doc_path}/faiss_chunks.pkl"
-        )
-        bm25 = BM25Retriever()
-        bm25.build_bm25_index(chunks)
-        bm25.save_index(output_path=f"{doc_path}/bm25_index.pkl")
+:root {
+    --bg-primary: #0a0c10;
+    --bg-secondary: #13151c;
+    --bg-card: rgba(255, 255, 255, 0.02);
+    --border-color: rgba(255, 255, 255, 0.07);
+    --text-primary: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    --accent-primary: #3b82f6;
+    --accent-secondary: #0ea5e9;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --error: #ef4444;
+}
 
-        # Step 5 — Knowledge graph
-        status_text.text("🕸️ Step 5/5: Building knowledge graph...")
-        progress_bar.progress(85, text="Building knowledge graph...")
-        gb = GraphBuilder()
-        gb.build_graph(chunks, embeddings)
-        gb.save_graph(output_path=f"{doc_path}/graph.pkl")
+/* ─── Body and Fonts ─── */
+.stApp {
+    background-color: var(--bg-primary) !important;
+    font-family: 'Inter', sans-serif !important;
+}
 
-        # Step 6 — Document Summary Generation
-        status_text.text("📝 Generating document summary...")
-        progress_bar.progress(90, text="Generating document summary...")
-        doc_text = "\n\n".join([c.get("text", "") for c in chunks])
-        llm = get_shared_models()["llm"]
-        embedder = get_shared_models()["embedder"]
-        doc_summary = llm.summarize_document(doc_text)
-        summary_emb = embedder.generate_query_embedding(doc_summary).tolist()
+h1, h2, h3, h4, h5, h6, .hero-title {
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 700 !important;
+    color: var(--text-primary) !important;
+}
 
-        # Write meta
-        meta = {
-            "filename": filename,
-            "doc_name": doc_name,
-            "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "page_count": len(set([c.get("page_number", 0) for c in chunks])),
-            "chunk_count": len(chunks),
-            "status": "ready",
-            "document_summary": doc_summary,
-            "summary_embedding": summary_emb
-        }
-        with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
-            json.dump(meta, f)
+.stApp > header { background: transparent !important; }
+.block-container { padding-top: 1.5rem !important; }
 
-        return meta
+/* Hide top decoration bar */
+div[data-testid="stHeader"] {
+    background: transparent !important;
+}
+div[data-testid="stDecoration"] {
+    background: transparent !important;
+    display: none !important;
+}
 
-    except Exception as e:
-        shutil.rmtree(doc_path, ignore_errors=True)
-        raise e
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
 
-def ingest_pdf(uploaded_file) -> dict:
-    """
-    Runs the full ingestion pipeline on an uploaded PDF.
-    Saves all indexes to doc_store/<doc_name>/.
-    Returns a metadata dict on success.
-    Raises an exception on failure.
-    """
-    filename = uploaded_file.name
-    # 1. Derive doc_name
-    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', filename.replace(".pdf", "")).lower()
-    doc_path = f"doc_store/{doc_name}"
+/* ─── Sidebar ─── */
+section[data-testid="stSidebar"] {
+    background-color: var(--bg-secondary) !important;
+    border-right: 1px solid var(--border-color) !important;
+}
+section[data-testid="stSidebar"] .stMarkdown p,
+section[data-testid="stSidebar"] .stMarkdown span {
+    color: var(--text-secondary) !important;
+    font-size: 0.85rem !important;
+}
 
-    # 2. Create directory
-    os.makedirs(doc_path, exist_ok=True)
+/* ─── Premium Button Overrides ─── */
+div.stButton > button {
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    font-size: 0.8rem !important;
+    padding: 0.35rem 0.75rem !important;
+    transition: all 0.15s ease-in-out !important;
+}
+/* Style primary buttons */
+div.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%) !important;
+    border: none !important;
+    color: white !important;
+    box-shadow: 0 4px 10px rgba(139, 92, 246, 0.2) !important;
+}
+div.stButton > button[kind="primary"]:hover {
+    box-shadow: 0 6px 14px rgba(139, 92, 246, 0.3) !important;
+    transform: translateY(-0.5px);
+    color: white !important;
+}
+/* Style secondary buttons */
+div.stButton > button[kind="secondary"] {
+    background: rgba(255, 255, 255, 0.02) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-secondary) !important;
+}
+div.stButton > button[kind="secondary"]:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+    border-color: rgba(139, 92, 246, 0.25) !important;
+    color: var(--text-primary) !important;
+}
 
-    try:
-        # 3. Save uploaded bytes
-        source_path = f"{doc_path}/source.pdf"
-        with open(source_path, "wb") as f:
-            f.write(uploaded_file.getvalue())
+/* ─── Expander Premium styling ─── */
+.streamlit-expanderHeader {
+    background-color: rgba(255, 255, 255, 0.01) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    font-size: 0.85rem !important;
+    font-weight: 500 !important;
+    color: var(--text-primary) !important;
+    margin-bottom: 0.35rem !important;
+}
+.streamlit-expanderContent {
+    background-color: rgba(255, 255, 255, 0.005) !important;
+    border-left: 1px solid var(--border-color) !important;
+    border-right: 1px solid var(--border-color) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    border-radius: 0 0 8px 8px !important;
+    padding: 0.75rem 1rem !important;
+    margin-top: -0.4rem !important;
+    margin-bottom: 0.5rem !important;
+}
 
-        # 4. Run chunker
-        chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
-        chunks = chunker.process_pdf(source_path)
-        for chunk in chunks:
-            chunk["source_filename"] = filename
-        with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
-            json.dump(chunks, f, ensure_ascii=False)
+/* ─── Chat bubble avatars ─── */
+div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageAvatar"],
+div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageAvatar"],
+div[data-testid="stChatMessage"]:has(img[alt="user"]) div[data-testid="stChatMessageAvatar"],
+div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) div[data-testid="stChatMessageAvatar"] {
+    background: rgba(139, 92, 246, 0.12) !important;
+    border-color: rgba(139, 92, 246, 0.25) !important;
+}
+div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) div[data-testid="stChatMessageAvatar"],
+div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageAvatar"],
+div[data-testid="stChatMessage"]:has(img[alt="assistant"]) div[data-testid="stChatMessageAvatar"],
+div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) div[data-testid="stChatMessageAvatar"] {
+    background: rgba(99, 102, 241, 0.12) !important;
+    border-color: rgba(99, 102, 241, 0.25) !important;
+}
 
-        # 5. Run embedder
-        embedder = get_shared_models()["embedder"]
-        embeddings = embedder.generate_embeddings(chunks)
-        np.save(f"{doc_path}/embeddings.npy", embeddings)
+/* Base style for chat message content bubble */
+div[data-testid="stChatMessageContent"] {
+    border-radius: 12px !important;
+    padding: 0.75rem 1.1rem !important;
+    color: var(--text-primary) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+    max-width: 82% !important;
+}
 
-        # 6. Build FAISS index
-        vs = VectorSearch()
-        vs.build_faiss_index(chunks, embeddings)
-        vs.save_index(index_path=f"{doc_path}/faiss.index", chunks_path=f"{doc_path}/faiss_chunks.pkl")
+/* ─── Chat input ─── */
+.stChatInput {
+    max-width: 800px !important;
+    margin: 0 auto !important;
+}
+.stChatInput > div {
+    background: #12141a !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+}
 
-        # 7. Build BM25 index
-        bm25 = BM25Retriever()
-        bm25.build_bm25_index(chunks)
-        bm25.save_index(output_path=f"{doc_path}/bm25_index.pkl")
+/* ─── File uploader ─── */
+[data-testid="stFileUploader"] {
+    background: rgba(255, 255, 255, 0.005) !important;
+    border: 1px dashed rgba(139, 92, 246, 0.2) !important;
+    border-radius: 10px !important;
+    padding: 0.4rem !important;
+    transition: all 0.2s ease !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: var(--accent-primary) !important;
+    background: rgba(139, 92, 246, 0.01) !important;
+}
 
-        # 8. Build knowledge graph
-        gb = GraphBuilder()
-        gb.build_graph(chunks, embeddings)
-        gb.save_graph(output_path=f"{doc_path}/graph.pkl")
+/* ─── Custom welcome hero onboarding ─── */
+.hero-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+    max-width: 680px;
+    margin: 2rem auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+}
+.hero-title {
+    font-size: 1.8rem;
+    font-weight: 700;
+    margin-bottom: 0.4rem;
+    color: var(--text-primary) !important;
+}
+.hero-subtitle {
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.5;
+    margin-bottom: 1.75rem;
+    max-width: 500px;
+}
+.onboarding-steps {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    width: 100%;
+    margin-top: 0.5rem;
+}
+.onboarding-step-card {
+    background: rgba(255, 255, 255, 0.015);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1rem 0.75rem;
+    text-align: center;
+}
+.onboarding-step-icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.4rem;
+}
+.onboarding-step-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.2rem;
+    font-size: 0.85rem;
+}
+.onboarding-step-desc {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    line-height: 1.3;
+}
 
-        # 9. Document Summary Generation
-        doc_text = "\n\n".join([c.get("text", "") for c in chunks])
-        llm = get_shared_models()["llm"]
-        embedder = get_shared_models()["embedder"]
-        doc_summary = llm.summarize_document(doc_text)
-        summary_emb = embedder.generate_query_embedding(doc_summary).tolist()
+/* Document cards in sidebar */
+.document-card {
+    background: rgba(255, 255, 255, 0.015);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.45rem 0.6rem;
+    margin-bottom: 0.4rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.document-title {
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 170px;
+}
+.document-meta {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+}
 
-        # 10. Write meta.json
-        meta = {
-            "filename": filename,
-            "doc_name": doc_name,
-            "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "page_count": len(set([c.get("page_number", 0) for c in chunks])),
-            "chunk_count": len(chunks),
-            "status": "ready",
-            "document_summary": doc_summary,
-            "summary_embedding": summary_emb
-        }
-        with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
-            json.dump(meta, f)
+/* Compact stats badges in header */
+.header-badge-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 0.25rem;
+}
+.header-badge {
+    background: rgba(255, 255, 255, 0.02) !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    padding: 2px 8px !important;
+    border-radius: 6px !important;
+    font-size: 0.7rem !important;
+    font-weight: 500 !important;
+}
 
-        return meta
-    except Exception as e:
-        shutil.rmtree(doc_path, ignore_errors=True)
-        raise e
+/* KPI metric cards inside settings/analytics */
+.kpi-card {
+    background: rgba(255, 255, 255, 0.01);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1rem;
+    text-align: center;
+}
+.kpi-val {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--accent-primary);
+    margin-bottom: 0.15rem;
+}
+.kpi-label {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+/* Badges styling */
+.badge-fast {
+    background: rgba(16, 185, 129, 0.08) !important;
+    color: #34d399 !important;
+    border: 1px solid rgba(16, 185, 129, 0.15) !important;
+    padding: 2px 8px !important;
+    border-radius: 6px !important;
+    font-size: 0.7rem !important;
+    font-weight: 600 !important;
+}
+.badge-verified {
+    background: rgba(14, 165, 233, 0.08) !important;
+    color: #38bdf8 !important;
+    border: 1px solid rgba(14, 165, 233, 0.15) !important;
+    padding: 2px 8px !important;
+    border-radius: 6px !important;
+    font-size: 0.7rem !important;
+    font-weight: 600 !important;
+}
+
+/* Inline badges above text input */
+.input-indicator-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 800px;
+    margin: 0.4rem auto;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
+
+
+/* ─── Circular Send Button Override ─── */
+.stChatInput button[kind="primary"],
+.stChatInput button[data-testid="stChatInputSubmitButton"] {
+    border-radius: 50% !important;
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    min-height: 36px !important;
+    padding: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: linear-gradient(135deg, #3b82f6 0%, #0ea5e9 100%) !important;
+    border: none !important;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3) !important;
+    transition: all 0.2s ease !important;
+    flex-shrink: 0 !important;
+}
+.stChatInput button[kind="primary"]:hover,
+.stChatInput button[data-testid="stChatInputSubmitButton"]:hover {
+    transform: scale(1.08) !important;
+    box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4) !important;
+}
+
+/* ─── Thinking Indicator ─── */
+@keyframes dotPulse {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1); }
+}
+.thinking-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0.6rem 1rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+.thinking-dots {
+    display: flex;
+    gap: 4px;
+}
+.thinking-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    animation: dotPulse 1.4s infinite ease-in-out both;
+}
+.thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+.thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0s; }
+
+/* ─── Response Action Bar (Copy / Regenerate) ─── */
+.response-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 0.5rem;
+    padding-top: 0.35rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+.response-action-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.15s ease;
+}
+.response-action-btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+}
+.response-action-btn svg {
+    width: 14px;
+    height: 14px;
+}
+.copy-toast {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(16, 185, 129, 0.9);
+    color: white;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    z-index: 9999;
+    animation: toastFade 2s ease forwards;
+}
+@keyframes toastFade {
+    0% { opacity: 0; transform: translateX(-50%) translateY(10px); }
+    15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+    70% { opacity: 1; }
+    100% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+}
+</style>
+
+""", unsafe_allow_html=True)
+
+
+# -----------------------------------------------------------------------------
+# 4. DATABASE INITIALIZATION
+# -----------------------------------------------------------------------------
+db = Database.get_db()
 
 
 # -----------------------------------------------------------------------------
@@ -214,9 +497,6 @@ def ingest_pdf(uploaded_file) -> dict:
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def get_shared_models() -> dict:
-    # Set the key in environment so Groq() client picks it up
-    if st.session_state.get("groq_api_key"):
-        os.environ["GROQ_API_KEY"] = st.session_state.groq_api_key
     return {
         "embedder": Embedder(),
         "llm": LLMGenerator(),
@@ -231,11 +511,11 @@ def get_shared_models() -> dict:
 
 
 # -----------------------------------------------------------------------------
-# 6. CACHED LOADER: get_doc_system(doc_name)
+# 6. HELPER: load_doc_systems / get_doc_system (Chat-Isolated)
 # -----------------------------------------------------------------------------
-def load_doc_systems(doc_name: str) -> dict:
+def load_doc_systems(user_id: str, chat_id: str, doc_name: str) -> dict:
     """Loads all indexes for a single document into memory."""
-    doc_path = f"doc_store/{doc_name}"
+    doc_path = f"doc_store/users/{user_id}/chats/{chat_id}/{doc_name}"
 
     with open(f"{doc_path}/chunks.json", "r", encoding="utf-8") as f:
         chunks = json.load(f)
@@ -265,12 +545,133 @@ def load_doc_systems(doc_name: str) -> dict:
     }
 
 @st.cache_resource
-def get_doc_system(doc_name: str) -> dict:
-    return load_doc_systems(doc_name)
+def get_doc_system(user_id: str, chat_id: str, doc_name: str) -> dict:
+    return load_doc_systems(user_id, chat_id, doc_name)
 
 
 # -----------------------------------------------------------------------------
-# 7. HELPER: query_all_docs()
+# 7. API KEY ENVIRONMENT INJECTION HELPER
+# -----------------------------------------------------------------------------
+def inject_user_api_keys(user_id: str) -> dict:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    keys = db.list_api_keys(user_id)
+    original_keys = {}
+    for k in keys:
+        if k["is_active"] != 1:
+            continue
+        p = k["provider"]
+        decrypted = k["decrypted_key"]
+        
+        env_names = []
+        if p == "groq":
+            env_names = ["GROQ_API_KEY"]
+        elif p == "openai":
+            env_names = ["OPENAI_API_KEY"]
+        elif p == "gemini":
+            env_names = ["GEMINI_API_KEY"]
+        elif p == "claude":
+            env_names = ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
+            
+        for env_name in env_names:
+            original_keys[env_name] = os.environ.get(env_name)
+            os.environ[env_name] = decrypted
+            
+    return original_keys
+
+def restore_api_keys(original_keys: dict):
+    for env_name, original_val in original_keys.items():
+        if original_val is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = original_val
+
+
+# -----------------------------------------------------------------------------
+# 8. INGESTION WITH PROGRESS (Chat-Isolated)
+# -----------------------------------------------------------------------------
+def ingest_pdf_with_progress(uploaded_file, progress_bar, status_text, user_id: str, chat_id: str) -> dict:
+    """Ingests a PDF file to the isolated chat folder and generates indexes."""
+    filename = uploaded_file.name
+    doc_name = re.sub(r'[^a-zA-Z0-9]', '_', filename.replace(".pdf", "").replace(".PDF", "")).lower()
+    doc_path = f"doc_store/users/{user_id}/chats/{chat_id}/{doc_name}"
+    os.makedirs(doc_path, exist_ok=True)
+
+    try:
+        # Step 1 - Save PDF
+        source_path = f"{doc_path}/source.pdf"
+        with open(source_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+
+        # Step 2 - Chunk
+        status_text.text("Chunking document...")
+        progress_bar.progress(20, text="Chunking...")
+        chunker = DocumentChunker(chunk_size_words=200, overlap_words=50)
+        chunks = chunker.process_pdf(source_path)
+        for chunk in chunks:
+            chunk["source_filename"] = filename
+        with open(f"{doc_path}/chunks.json", "w", encoding="utf-8") as f:
+            json.dump(chunks, f, ensure_ascii=False)
+
+        # Step 3 - Embed
+        status_text.text("Generating embeddings...")
+        progress_bar.progress(45, text="Embedding...")
+        embedder = get_shared_models()["embedder"]
+        embeddings = embedder.generate_embeddings(chunks)
+        np.save(f"{doc_path}/embeddings.npy", embeddings)
+
+        # Step 4 - FAISS + BM25
+        status_text.text("Building search indexes...")
+        progress_bar.progress(65, text="Indexing...")
+        vs = VectorSearch()
+        vs.build_faiss_index(chunks, embeddings)
+        vs.save_index(
+            index_path=f"{doc_path}/faiss.index",
+            chunks_path=f"{doc_path}/faiss_chunks.pkl"
+        )
+        bm25 = BM25Retriever()
+        bm25.build_bm25_index(chunks)
+        bm25.save_index(output_path=f"{doc_path}/bm25_index.pkl")
+
+        # Step 5 - Knowledge graph
+        status_text.text("Building knowledge graph...")
+        progress_bar.progress(85, text="Knowledge Graph...")
+        gb = GraphBuilder()
+        gb.build_graph(chunks, embeddings)
+        gb.save_graph(output_path=f"{doc_path}/graph.pkl")
+
+        # Step 6 - Document Summary Generation
+        status_text.text("Summarizing document...")
+        progress_bar.progress(90, text="Summarizing...")
+        doc_text = "\n\n".join([c.get("text", "") for c in chunks])
+        llm = get_shared_models()["llm"]
+        embedder = get_shared_models()["embedder"]
+        doc_summary = llm.summarize_document(doc_text)
+        summary_emb = embedder.generate_query_embedding(doc_summary).tolist()
+
+        # Write meta
+        meta = {
+            "filename": filename,
+            "doc_name": doc_name,
+            "upload_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "page_count": len(set([c.get("page_number", 0) for c in chunks])),
+            "chunk_count": len(chunks),
+            "status": "ready",
+            "document_summary": doc_summary,
+            "summary_embedding": summary_emb
+        }
+        with open(f"{doc_path}/meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+        return meta
+
+    except Exception as e:
+        shutil.rmtree(doc_path, ignore_errors=True)
+        raise e
+
+
+# -----------------------------------------------------------------------------
+# 9. CORE: query_all_docs()
 # -----------------------------------------------------------------------------
 def verify_citations(answer: str, sources: list) -> str:
     """
@@ -292,8 +693,8 @@ def verify_citations(answer: str, sources: list) -> str:
     
     # Format markers for UI
     v_answer = cit_res["verified_answer"]
-    v_answer = v_answer.replace(" [Verified]", " <span style='color:#2ecc71; font-weight:bold; font-size: 0.85em;'>✓ Verified</span>")
-    v_answer = v_answer.replace(" [Unverified]", " <span style='color:#e74c3c; font-weight:bold; font-size: 0.85em;'>⚠️ Unverified</span>")
+    v_answer = v_answer.replace(" [Verified]", " <span style='color:#10b981; font-weight:600; font-size: 0.82em;'>[Verified]</span>")
+    v_answer = v_answer.replace(" [Unverified]", " <span style='color:#ef4444; font-weight:600; font-size: 0.82em;'>[Unverified]</span>")
     return v_answer
 
 def clean_answer_formatting(text: str) -> str:
@@ -308,18 +709,17 @@ def clean_answer_formatting(text: str) -> str:
         cleaned.append(line)
     return '\n'.join(cleaned)
 
-
 def parse_llm_response(raw: str) -> tuple:
     """
     Splits LLM response into (clean_answer, confidence_label, confidence_emoji).
     LLM self-reports confidence — accurate regardless of query typos.
     """
     confidence_map = {
-        "HIGH":   ("High",   "🟢"),
-        "MEDIUM": ("Medium", "🟡"),
-        "LOW":    ("Low",    "🔴"),
+        "HIGH":   ("High",   ""),
+        "MEDIUM": ("Medium", ""),
+        "LOW":    ("Low",    ""),
     }
-    label, emoji = "Medium", "🟡"
+    label, emoji = "Medium", ""
     answer = raw.strip()
 
     for key, (l, e) in confidence_map.items():
@@ -332,7 +732,14 @@ def parse_llm_response(raw: str) -> tuple:
     answer = clean_answer_formatting(answer)
     return answer, label, emoji
 
-def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: int = 1, chat_history: list = None) -> dict:
+def query_all_docs(query: str, user_id: str, chat_id: str, doc_names: list, top_k: int = 10, graph_depth: int = 1, chat_history: list = None, mode: str = "FAST", active_provider: str = "groq", active_model: str = None) -> dict:
+    import time
+    from performance_tracker import PerformanceTracker
+    tracker = PerformanceTracker()
+    tracker.reset_call_count()
+    
+    t_total_start = time.perf_counter()
+
     shared = get_shared_models()
     embedder = shared["embedder"]
     reranker = shared["reranker"]
@@ -343,10 +750,10 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     claim_extractor = shared["claim_extractor"]
     claim_verifier = shared["claim_verifier"]
 
-    # 1. Understand Intent (Query Classification)
+    # 1. Timing: Classification & Planning
+    t_start = time.perf_counter()
     query_type = classifier.classify(query)
 
-    # 2. Retrieval Planning
     traversal = "BFS"
     use_decomposition = False
     
@@ -370,27 +777,45 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
         graph_depth = 3
         traversal = "HYBRID"
         use_decomposition = True
+    classification_ms = (time.perf_counter() - t_start) * 1000
 
-    # 3. Query Decomposition (Conditional)
-    if use_decomposition:
+    # 2. Timing: Query Decomposition
+    t_start = time.perf_counter()
+    if use_decomposition and mode != "FAST":
         sub_questions = decomposer.decompose(query)
     else:
         sub_questions = [query]
+    decomposition_ms = (time.perf_counter() - t_start) * 1000
+
+    hyde_ms = 0.0
+    retrieval_ms = 0.0
+    graph_expansion_ms = 0.0
 
     merged_candidates = []
 
-    # 4. Parallel-style Search per sub-question
+    # 3. Timing: Retrieve candidates per sub-question
     for sub_q in sub_questions:
-        hypothesis = hyde.generate_hypothesis(sub_q)
-        q_emb_hyde = embedder.generate_query_embedding(hypothesis)
-        q_emb_original = embedder.generate_query_embedding(sub_q)
+        # HyDE - skip in FAST mode to avoid expensive LLM call
+        t_sub_start = time.perf_counter()
+        if mode == "FAST":
+            q_emb_search = embedder.generate_query_embedding(sub_q)
+            q_emb_original = q_emb_search
+        else:
+            hypothesis = hyde.generate_hypothesis(sub_q)
+            q_emb_search = embedder.generate_query_embedding(hypothesis)
+            q_emb_original = embedder.generate_query_embedding(sub_q)
+        hyde_ms += (time.perf_counter() - t_sub_start) * 1000
 
+        # Retrieval (BM25 + Vector)
         for doc_name in doc_names:
-            sys = get_doc_system(doc_name)
+            t_ret_start = time.perf_counter()
+            sys = get_doc_system(user_id, chat_id, doc_name)
 
             bm25_res = sys["bm25"].bm25_search(sub_q, top_k=10)
-            vec_res = sys["vs"].vector_search(q_emb_hyde, top_k=10)
+            vec_res = sys["vs"].vector_search(q_emb_search, top_k=10)
+            retrieval_ms += (time.perf_counter() - t_ret_start) * 1000
 
+            t_graph_start = time.perf_counter()
             graph_res = []
             if graph_depth > 0:
                 seeds = [res[0] for res in sys["vs"].vector_search(q_emb_original, top_k=3)]
@@ -400,11 +825,12 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
                     use_bfs=True,
                     strategy=traversal
                 )
+            graph_expansion_ms += (time.perf_counter() - t_graph_start) * 1000
 
             fused_res = sys["fusion"].fuse_results(bm25_res, vec_res, graph_res, top_k=10)
             merged_candidates.extend(fused_res)
 
-    # 5. Global Deduplication by chunk_id
+    # 4. Global Deduplication
     seen_ids = set()
     unique_candidates = []
     for chunk, score in merged_candidates:
@@ -416,13 +842,15 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
     unique_candidates.sort(key=lambda x: x[1], reverse=True)
     unique_candidates = unique_candidates[:50]
 
-    # Rerank against ORIGINAL query with query type term boosting
+    # Reranking
+    t_start = time.perf_counter()
     final_res = reranker.rerank(query, unique_candidates, top_k=top_k, query_type=query_type)
+    rerank_ms = (time.perf_counter() - t_start) * 1000
 
     # Load active document summaries
     document_summaries = []
     for doc_name in doc_names:
-        meta_path = f"doc_store/{doc_name}/meta.json"
+        meta_path = f"doc_store/users/{user_id}/chats/{chat_id}/{doc_name}/meta.json"
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -432,9 +860,63 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
             except:
                 pass
 
-    # 6. LLM Generation
-    raw_answer = llm.generate_answer(query, final_res, chat_history=chat_history, document_summaries=document_summaries)
+    # Context construction
+    context = llm.build_context(final_res, document_summaries)
+
+    system_prompt = """You are a precise Q&A assistant. Answer ONLY from the provided Context.
+
+STRICT RULES:
+- Only use information from the Context. If not found, say "I cannot answer this based on the provided documents."
+- Cite sources inline using the source filename and page number like [filename.pdf, Page X].
+- NEVER repeat a sentence, phrase, or conclusion you have already written.
+- NEVER write filler like "In conclusion", "Overall", "In summary" more than once.
+- NEVER pad the answer. Each sentence must add NEW information.
+- If the user asks for a specific length, cover MORE topics and details — never repeat points.
+- If the user asks a follow-up question, use the conversation history to understand what they are referring to.
+- Stop writing the moment you have no new information to add.
+
+FORMAT RULES:
+- Always answer using markdown formatting.
+- Start with a one-line definition as plain text.
+- Then use markdown bullet points (start each point with "- ").
+- Each bullet = one distinct fact with its source citation.
+- If the user asks for code or an algorithm, present it in a clean code block (```).
+  Use the pseudocode/algo notation from the source — do not convert to Python.
+  If the OCR text looks garbled or corrupted, use your understanding of the algorithm
+  to present a clean readable version in the same pseudocode style.
+- Keep each bullet concise — one idea per bullet, max 2 lines.
+
+After your answer, on a NEW LINE, output exactly one of these — nothing else on that line:
+CONFIDENCE: HIGH
+CONFIDENCE: MEDIUM
+CONFIDENCE: LOW
+
+Use HIGH if the context directly and fully answers the question.
+Use MEDIUM if the context partially answers or required some inference.
+Use LOW if the answer is not clearly in the context or you said you cannot answer."""
+
+    formatted_history = []
+    if chat_history:
+        for m in chat_history[-4:]:
+            if m["role"] in ("user", "assistant"):
+                formatted_history.append({"role": m["role"], "content": m.get("content", "")})
+
+    user_content = f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+
+    # 5. LLM Answer Generation with Provider Routing
+    t_start = time.perf_counter()
+    provider_manager = MultiProviderManager(db.list_api_keys(user_id))
+    
+    raw_answer, final_p, final_m = provider_manager.generate(
+        prompt=user_content,
+        system_prompt=system_prompt,
+        chat_history=formatted_history,
+        target_provider=active_provider,
+        model=active_model
+    )
     answer, confidence_label, confidence_emoji = parse_llm_response(raw_answer)
+    generation_ms = (time.perf_counter() - t_start) * 1000
+    tracker.increment_llm_calls()
 
     sources = []
     for chunk, score in final_res:
@@ -445,21 +927,82 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
             "text": chunk.get("text", "")
         })
 
-    # Verify citations against actual retrieved sources
-    answer = verify_citations(answer, sources)
+    # 6. Verification Stages
+    claims_list = []
+    grounding_score = 100.0
+    trust_level = "VERIFIED"
+    hallucination_risk = "LOW"
+    claim_extraction_ms = 0.0
+    claim_verification_ms = 0.0
+    citation_verification_ms = 0.0
+    grounding_ms = 0.0
 
-    # Extract and verify claims
-    claims_list = claim_extractor.extract_claims(answer)
-    verify_res = claim_verifier.verify_claims(claims_list, final_res)
+    if mode == "VERIFIED":
+        # Claim Extraction
+        t_start = time.perf_counter()
+        claims = claim_extractor.extract_claims(answer)
+        claim_extraction_ms = (time.perf_counter() - t_start) * 1000
+        
+        # Claim Verification
+        t_start = time.perf_counter()
+        verify_res = claim_verifier.verify_claims(claims, final_res)
+        claims_list = verify_res["claims"]
+        grounding_score = verify_res["grounding_score"]
+        trust_level = verify_res["trust_level"]
+        hallucination_risk = verify_res["hallucination_risk"]
+        claim_verification_ms = (time.perf_counter() - t_start) * 1000
 
-    # Record trace information
+        # Citation Verification
+        t_start = time.perf_counter()
+        answer = verify_citations(answer, sources)
+        citation_verification_ms = (time.perf_counter() - t_start) * 1000
+
+    total_ms = (time.perf_counter() - t_total_start) * 1000
+
+    stages_timings = {
+        "classification": classification_ms,
+        "hyde": hyde_ms,
+        "decomposition": decomposition_ms,
+        "retrieval": retrieval_ms,
+        "graph_expansion": graph_expansion_ms,
+        "rerank": rerank_ms,
+        "generation": generation_ms,
+        "claim_extraction": claim_extraction_ms,
+        "claim_verification": claim_verification_ms,
+        "citation_verification": citation_verification_ms,
+        "grounding": grounding_ms
+    }
+    slowest_stage = max(stages_timings, key=stages_timings.get)
+    slowest_stage_ms = stages_timings[slowest_stage]
+
+    perf_trace = {
+        "total_ms": total_ms,
+        "slowest_stage": slowest_stage,
+        "slowest_stage_ms": round(slowest_stage_ms, 1),
+        "classification_ms": round(classification_ms, 1),
+        "hyde_ms": round(hyde_ms, 1),
+        "decomposition_ms": round(decomposition_ms, 1),
+        "retrieval_ms": round(retrieval_ms, 1),
+        "graph_expansion_ms": round(graph_expansion_ms, 1),
+        "rerank_ms": round(rerank_ms, 1),
+        "generation_ms": round(generation_ms, 1),
+        "claim_extraction_ms": round(claim_extraction_ms, 1),
+        "claim_verification_ms": round(claim_verification_ms, 1),
+        "citation_verification_ms": round(citation_verification_ms, 1),
+        "grounding_ms": round(grounding_ms, 1),
+        "claims_count": len(claims_list),
+        "avg_per_claim_ms": round((claim_verification_ms / len(claims_list)) if claims_list else 0.0, 1)
+    }
+    tracker.log_trace(perf_trace)
+
     trace = {
         "query_type": query_type,
         "sub_questions": sub_questions,
         "traversal_used": traversal,
         "graph_depth": graph_depth,
         "retrieval_strategy": f"BM25 + Vector + Graph ({traversal})",
-        "candidate_pool_size": len(unique_candidates)
+        "candidate_pool_size": len(unique_candidates),
+        "performance": perf_trace
     }
 
     return {
@@ -467,275 +1010,918 @@ def query_all_docs(query: str, doc_names: list, top_k: int = 10, graph_depth: in
         "sources": sources,
         "confidence": confidence_label,
         "confidence_emoji": confidence_emoji,
-        "grounding_score": verify_res["grounding_score"],
-        "trust_level": verify_res["trust_level"],
-        "hallucination_risk": verify_res["hallucination_risk"],
-        "claims": verify_res["claims"],
-        "trace": trace
+        "grounding_score": grounding_score,
+        "trust_level": trust_level,
+        "hallucination_risk": hallucination_risk,
+        "claims": claims_list,
+        "trace": trace,
+        "performance": perf_trace
     }
 
 
 # -----------------------------------------------------------------------------
-# 8. HELPER: delete_doc()
+# 10. HELPER: delete_doc() - Database & File Sync
 # -----------------------------------------------------------------------------
-def delete_doc(doc_name: str):
-    shutil.rmtree(f"doc_store/{doc_name}", ignore_errors=True)
-    st.session_state.uploaded_docs = [d for d in st.session_state.uploaded_docs if d != doc_name]
+def delete_doc(user_id: str, chat_id: str, document_id: str, doc_name: str):
+    doc_path = f"doc_store/users/{user_id}/chats/{chat_id}/{doc_name}"
+    shutil.rmtree(doc_path, ignore_errors=True)
+    db.delete_document(document_id)
     get_doc_system.clear()
     st.rerun()
 
 
 # -----------------------------------------------------------------------------
-# 9. SESSION STATE INITIALIZATION
+# 11. HELPER: get_combined_graph()
 # -----------------------------------------------------------------------------
-if "uploaded_docs" not in st.session_state:
-    st.session_state.uploaded_docs = get_existing_docs()
+def get_combined_graph(user_id: str, chat_id: str, docs: list) -> GraphBuilder:
+    import networkx as nx
+    combined = nx.Graph()
+    for doc in docs:
+        doc_path = f"doc_store/users/{user_id}/chats/{chat_id}/{doc['doc_name']}/graph.pkl"
+        if os.path.exists(doc_path):
+            try:
+                with open(doc_path, "rb") as f:
+                    g = pickle.load(f)
+                combined = nx.compose(combined, g)
+            except:
+                pass
+    builder = GraphBuilder()
+    builder.graph = combined
+    return builder
+
+
+# -----------------------------------------------------------------------------
+# 12. SESSION STATE INITIALIZATION
+# -----------------------------------------------------------------------------
+if "user" not in st.session_state or st.session_state.user is None:
+    # Auto-initialize user from DB or create if missing
+    dev_user_id = "b1710dc5-73f5-469d-afd6-f4fdb2a9bfbc"
+    user_record = db.get_user(dev_user_id)
+    if not user_record:
+        with db._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, google_id, email, display_name, role, created_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (dev_user_id, "mock-dev-id-1234", "dev-revanth@example.com", "Beta Version", "user", datetime.now().isoformat(), datetime.now().isoformat())
+            )
+            conn.commit()
+        user_record = db.get_user(dev_user_id)
+    st.session_state.user = user_record
+
+if "active_chat_id" not in st.session_state:
+    st.session_state.active_chat_id = None
+
+# chat_alignment default layout used directly
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "groq_api_key" not in st.session_state:
-    st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
+if "answering_mode" not in st.session_state:
+    st.session_state.answering_mode = "FAST"
+
+if "settings_top_k" not in st.session_state:
+    st.session_state.settings_top_k = 10
+
+if "settings_depth" not in st.session_state:
+    st.session_state.settings_depth = 1
+
+if "last_query_metrics" not in st.session_state:
+    st.session_state.last_query_metrics = None
+
+if "selected_node_id" not in st.session_state:
+    st.session_state.selected_node_id = None
+
+if "show_uploader" not in st.session_state:
+    st.session_state.show_uploader = False
+
+if "is_generating" not in st.session_state:
+    st.session_state.is_generating = False
+
+if "regenerate_query" not in st.session_state:
+    st.session_state.regenerate_query = None
+
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
 
 
-# -----------------------------------------------------------------------------
-# 10. SIDEBAR UI
-# -----------------------------------------------------------------------------
-st.sidebar.title("GraphRAG")
-st.sidebar.caption("Zero hallucination document Q&A")
+# =============================================================================
+# 14. LOGGED IN CONTEXT
+# =============================================================================
+user = st.session_state.user
+user_id = user["user_id"]
 
-st.sidebar.markdown("── API Key ──")
-api_key_input = st.sidebar.text_input(
-    "Groq API Key",
-    value=st.session_state.groq_api_key,
-    type="password",
-    placeholder="gsk_...",
-    help="Get a free key at console.groq.com"
-)
-if api_key_input != st.session_state.groq_api_key:
-    st.session_state.groq_api_key = api_key_input
-    # Clear cached models so they reload with the new key
-    get_shared_models.clear()
-    st.rerun()
+# Fetch chats list
+chats = db.list_chats(user_id)
 
-if not st.session_state.groq_api_key:
-    st.sidebar.warning("⚠️ Enter your Groq API key to enable answers")
-else:
-    st.sidebar.success("✓ API key set")
+# Set active chat if none active
+if not st.session_state.active_chat_id and chats:
+    st.session_state.active_chat_id = chats[0]["chat_id"]
+elif st.session_state.active_chat_id and not any(c["chat_id"] == st.session_state.active_chat_id for c in chats):
+    st.session_state.active_chat_id = chats[0]["chat_id"] if chats else None
 
-st.sidebar.markdown("── Your Documents ──")
+active_chat_id = st.session_state.active_chat_id
+active_chat = next((c for c in chats if c["chat_id"] == active_chat_id), None) if active_chat_id else None
 
-for doc_name in list(st.session_state.uploaded_docs):
-    meta_path = f"doc_store/{doc_name}/meta.json"
-    if os.path.exists(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        col1, col2 = st.sidebar.columns([4, 1])
-        col1.markdown(f"📄 **{meta['filename']}**")
-        col1.caption(f"{meta.get('chunk_count', 0)} chunks · {meta.get('page_count', 0)} pages")
-        if col2.button("🗑", key=f"del_{doc_name}"):
-            delete_doc(doc_name)
+# Sync chat_title in session state
+if active_chat:
+    if "chat_title" not in st.session_state or st.session_state.get("last_chat_id") != active_chat_id:
+        st.session_state.chat_title = active_chat["title"]
+        st.session_state.last_chat_id = active_chat_id
+
+
+# =============================================================================
+# 15. LEFT SIDEBAR UI
+# =============================================================================
+with st.sidebar:
+    st.markdown(f"""
+    <div style="display:flex; align-items:center; gap:10px; padding: 0.5rem 0; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border-color);">
+        <img src="data:image/png;base64,{base64_logo}" style="width: 28px; height: 28px; border-radius: 4px; object-fit: contain;"/>
+        <div>
+            <div style="font-size:1.15rem; font-weight:700; color:#f3f4f6; line-height:1.2;">Adaptive Workspace</div>
+            <div style="font-size:0.72rem; color:#6b7280; margin-top:1px;">Personal AI Assistant</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 1. New Chat Button (Visual Reset)
+    if st.button("New Chat", use_container_width=True, type="primary", key="btn_new_chat"):
+        if active_chat_id:
+            db.clear_chat_history(active_chat_id)
+            db.rename_chat(active_chat_id, "New Chat")
+            st.session_state.chat_title = "New Chat"
+        st.session_state.messages = []
+        st.rerun()
+
+    # 2. Documents Section
+    st.markdown("<div style='margin-top: 1.25rem; margin-bottom: 0.5rem; font-size: 0.72rem; font-weight: 700; color: #6b7280; letter-spacing: 0.05em;'>DOCUMENTS</div>", unsafe_allow_html=True)
+    if not active_chat_id:
+        st.caption("No active workspace.")
+        active_docs = []
     else:
-        # cleanup missing
-        st.session_state.uploaded_docs.remove(doc_name)
-
-st.sidebar.markdown("── ── ── ── ── ──")
-
-col1, col2 = st.sidebar.columns(2)
-if col1.button("🗑 Clear Chat", use_container_width=True):
-    st.session_state.messages = []
-    st.rerun()
-
-if col2.button("↺ Reload Docs", use_container_width=True,
-               help="Rescan doc_store for new documents"):
-    st.session_state.uploaded_docs = get_existing_docs()
-    get_doc_system.clear()
-    st.rerun()
-
-uploaded_file = st.sidebar.file_uploader(
-    "Upload a PDF",
-    type=["pdf"],
-    label_visibility="collapsed"
-)
-
-if uploaded_file:
-    already_uploaded_names = []
-    for d in st.session_state.uploaded_docs:
-        meta_path = f"doc_store/{d}/meta.json"
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    already_uploaded_names.append(json.load(f)["filename"])
-            except:
-                pass
-
-    if uploaded_file.name not in already_uploaded_names:
-        progress_bar = st.sidebar.progress(0, text="Starting...")
-        status_text = st.sidebar.empty()
-
-        try:
-            # Step 1: Save and chunk
-            status_text.text("📄 Step 1/5: Extracting text...")
-            progress_bar.progress(10, text="Extracting text...")
-            meta = ingest_pdf_with_progress(
-                uploaded_file, progress_bar, status_text
-            )
-            st.session_state.uploaded_docs.append(meta["doc_name"])
-            progress_bar.progress(100, text="✅ Done!")
-            status_text.text(f"✅ {uploaded_file.name} ready!")
-            import time; time.sleep(1)
-            progress_bar.empty()
-            status_text.empty()
-            st.rerun()
-        except Exception as e:
-            progress_bar.empty()
-            status_text.empty()
-            st.sidebar.error(f"❌ Failed: {e}")
-
-st.sidebar.markdown("── Settings ──")
-with st.sidebar.expander("⚙️ Settings"):
-    top_k = st.slider("Results per document", 3, 20, 5)
-    graph_depth = st.slider("Graph depth", 0, 3, 1)
-
-
-# -----------------------------------------------------------------------------
-# 11. MAIN AREA UI
-# -----------------------------------------------------------------------------
-if not st.session_state.get("groq_api_key"):
-    st.warning("⚠️ Enter your Groq API key in the sidebar to enable answers.")
-
-if not st.session_state.uploaded_docs:
-    st.title("GraphRAG")
-    st.markdown("### Upload a PDF to get started")
-    st.markdown("Your documents are processed locally. "
-                "Answers are grounded in your documents only — no hallucinations.")
-    st.info("👈 Upload a PDF using the sidebar to begin")
-    st.stop()
-
-def render_assistant_dashboard(msg: dict):
-    # Confidence badge
-    if msg.get("confidence"):
-        st.caption(
-            f"{msg['confidence_emoji']} **Confidence: {msg['confidence']}**"
-        )
-        
-    # Phase 4 Trust Dashboard
-    if "trust_level" in msg:
-        tl = msg["trust_level"]
-        gs = msg["grounding_score"]
-        hr = msg["hallucination_risk"]
-        
-        # Color mapping
-        color_map = {
-            "VERIFIED": ("🛡️ Verified", "green"),
-            "HIGH CONFIDENCE": ("🟢 High Confidence", "blue"),
-            "MEDIUM CONFIDENCE": ("🟡 Medium Confidence", "orange"),
-            "LOW CONFIDENCE": ("🟠 Low Confidence", "red"),
-            "UNTRUSTED": ("⚠️ Untrusted", "red")
-        }
-        label, color = color_map.get(tl, (f"❔ {tl}", "gray"))
-        
-        # Draw badge and progress
-        st.markdown(f"**Trust Metric**: :{color}[{label}] ({gs}% Grounded)")
-        st.progress(max(0.0, min(1.0, gs / 100.0)))
-        
-        # Show claims break-down if any
-        if msg.get("claims"):
-            with st.expander("📝 Claim Verification Breakdown"):
-                for c in msg["claims"]:
-                    status = c.get("status", "UNSUPPORTED")
-                    explanation = c.get("explanation", "")
-                    claim_text = c.get("claim", "")
-                    
-                    status_colors = {
-                        "SUPPORTED": "green",
-                        "PARTIALLY_SUPPORTED": "orange",
-                        "UNSUPPORTED": "red"
-                    }
-                    col = status_colors.get(status, "gray")
-                    st.markdown(f"**Claim**: {claim_text}")
-                    st.markdown(f"Status: :{col}[{status}]")
-                    st.caption(explanation)
-                    st.divider()
-                    
-        # Check for hallucination risk warnings
-        if hr in ["HIGH", "MEDIUM"]:
-            unsupported = [c for c in msg.get("claims", []) if c.get("status") == "UNSUPPORTED"]
-            if unsupported:
-                st.warning(f"⚠️ **Hallucination Risk Warning: {hr}**\n\nThe following claims are UNSUPPORTED by the retrieved documents:\n" + 
-                           "\n".join([f"- *{c['claim']}*" for c in unsupported]))
-
-    # Traces
-    if msg.get("trace"):
-        with st.expander("🔍 Adaptive Retrieval Trace"):
-            t = msg["trace"]
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Query Intent", t.get("query_type"))
-            c2.metric("Traversal", t.get("traversal_used"))
-            c3.metric("Graph Depth", t.get("graph_depth"))
-            if len(t.get("sub_questions", [])) > 1:
-                st.write("**Decomposed Sub-Questions:**")
-                for sq in t.get("sub_questions", []):
-                    st.markdown(f"- *{sq}*")
-
-    # Sources
-    if msg.get("sources"):
-        with st.expander(f"📚 Sources ({len(msg['sources'])} chunks)"):
-            for src in msg["sources"]:
-                st.markdown(
-                    f"**{src['filename']}** · Page {src['page']} · "
-                    f"Score: {src['score']:.2f}"
-                )
-                st.caption(src["text"][:300] + "...")
-                st.divider()
-
-# Chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"], unsafe_allow_html=True)
-        if msg["role"] == "assistant":
-            render_assistant_dashboard(msg)
-
-if prompt := st.chat_input(
-    "Ask anything about your documents...",
-    disabled=len(st.session_state.uploaded_docs) == 0 or not st.session_state.get("groq_api_key")
-):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Searching your documents..."):
-            try:
-                result = query_all_docs(
-                    prompt,
-                    st.session_state.uploaded_docs,
-                    top_k=top_k,
-                    graph_depth=graph_depth,
-                    chat_history=st.session_state.messages
-                )
-                st.markdown(result["answer"], unsafe_allow_html=True)
-                render_assistant_dashboard(result)
+        active_docs = db.list_documents(active_chat_id)
+        if not active_docs:
+            st.caption("No documents in this workspace.")
+        else:
+            for d in active_docs:
+                page_cnt = d.get("page_count")
+                page_str = f"{page_cnt} pages" if page_cnt else "ready"
                 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": result["answer"],
-                    "sources": result["sources"],
-                    "confidence": result.get("confidence", "Medium"),
-                    "confidence_emoji": result.get("confidence_emoji", "🟡"),
-                    "grounding_score": result.get("grounding_score", 100.0),
-                    "trust_level": result.get("trust_level", "VERIFIED"),
-                    "hallucination_risk": result.get("hallucination_risk", "LOW"),
-                    "claims": result.get("claims", []),
-                    "trace": result.get("trace")
-                })
+                col_doc, col_del = st.columns([5, 1])
+                with col_doc:
+                    svg_doc_icon = """<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle; color: #3b82f6;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>"""
+                    st.markdown(f"""
+                    <div style="font-size: 0.78rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 0;" title="{d['filename']} ({page_str})">
+                        {svg_doc_icon}{d['filename']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_del:
+                    if st.button("X", key=f"del_doc_sidebar_{d['document_id']}", use_container_width=True, help="Remove document"):
+                        delete_doc(user_id, active_chat_id, d["document_id"], d["doc_name"])
+                        st.rerun()
+
+        # Upload PDFs button in sidebar
+        if st.button("Upload PDFs", use_container_width=True, key="sidebar_upload_btn"):
+            st.session_state.show_uploader = not st.session_state.show_uploader
+            st.rerun()
+        
+        if st.session_state.show_uploader:
+            uploaded_files = st.file_uploader(
+                "Upload PDF documents", 
+                type=["pdf"], 
+                accept_multiple_files=True,
+                key=f"sidebar_uploader_{active_chat_id}"
+            )
+            
+            if uploaded_files:
+                existing_filenames = {d["filename"] for d in active_docs}
+                new_files = [f for f in uploaded_files if f.name not in existing_filenames]
+                
+                if new_files:
+                    for f in new_files:
+                        prog_bar = st.progress(0, text=f"Ingesting {f.name}...")
+                        status_txt = st.empty()
+                        try:
+                            orig_env = inject_user_api_keys(user_id)
+                            meta = ingest_pdf_with_progress(f, prog_bar, status_txt, user_id, active_chat_id)
+                            restore_api_keys(orig_env)
+                            
+                            db.add_document(
+                                chat_id=active_chat_id,
+                                user_id=user_id,
+                                filename=f.name,
+                                doc_name=meta["doc_name"],
+                                page_count=meta["page_count"],
+                                chunk_count=meta["chunk_count"],
+                                status="ready",
+                                document_summary=meta.get("document_summary", ""),
+                                summary_embedding=meta.get("summary_embedding"),
+                                metadata=None
+                            )
+                        except Exception as e:
+                            prog_bar.empty()
+                            err_msg = str(e)
+                            if "Failover error" in err_msg or "429" in err_msg or "Rate limit" in err_msg or "Too Many Requests" in err_msg:
+                                status_txt.error("Ingestion failed: API rate limit exhausted. Check Settings.")
+                            else:
+                                status_txt.error(f"Ingestion failed: {e}")
+                    
+                    st.session_state.show_uploader = False
+                    st.rerun()
+
+    # 4. Chronological Chats switching (Bottom of sidebar) - Only show when there is actual history or multiple chats
+    show_conversations = len(chats) > 1 or (len(chats) == 1 and chats[0]["title"] != "New Chat")
+    if show_conversations:
+        st.markdown("<div style='margin-top: 1.5rem; margin-bottom: 0.5rem; font-size: 0.72rem; font-weight: 700; color: #6b7280; letter-spacing: 0.05em;'>CONVERSATIONS</div>", unsafe_allow_html=True)
+        for c in chats:
+            is_active = (c["chat_id"] == active_chat_id)
+            btn_type = "primary" if is_active else "secondary"
+            title = c["title"]
+            if len(title) > 22:
+                title = title[:20] + "..."
+            if st.button(title, key=f"chat_nav_sidebar_{c['chat_id']}", use_container_width=True, type=btn_type):
+                st.session_state.active_chat_id = c["chat_id"]
+                st.session_state.chat_title = c["title"]
+                st.rerun()
+
+    # 5. User Profile Footer & Logout
+    st.markdown("---")
+    prof_col1, prof_col2 = st.columns([1, 3])
+    with prof_col1:
+        if user.get("profile_picture"):
+            st.image(user["profile_picture"], width=30)
+        else:
+            st.markdown("<div style='width:30px; height:30px; border-radius:50%; background:#3b82f6; text-align:center; line-height:30px; color:white; font-weight:bold; font-size: 0.8rem;'>U</div>", unsafe_allow_html=True)
+    with prof_col2:
+        st.markdown(f"<div style='font-weight:600; color:#f3f4f6; font-size:0.8rem; line-height:30px;'>{user['display_name']}</div>", unsafe_allow_html=True)
+
+
+# =============================================================================
+# 16. MAIN AREA UI
+# =============================================================================
+# Load messages history for active chat
+if active_chat_id:
+    st.session_state.messages = db.get_chat_history(active_chat_id)
+else:
+    st.session_state.messages = []
+
+# Top Bar Badges Rendering
+if active_chat:
+    docs_count = len(db.list_documents(active_chat_id))
+    chat_title = st.session_state.get("chat_title", active_chat["title"])
+    st.markdown(f"""
+    <div style="margin-bottom:1rem; border-bottom:1px solid var(--border-color); padding-bottom:0.75rem;">
+        <h2 style="margin:0; font-size:1.5rem; font-weight:700; color:var(--text-primary);">{chat_title}</h2>
+        <div class="header-badge-container">
+            <span class="header-badge">Documents: {docs_count}</span>
+            <span class="header-badge">Model: {active_chat['model_name']}</span>
+            <span class="header-badge">Provider: {active_chat['model_provider'].upper()}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown(f"""
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:0.5rem;">
+        <img src="data:image/png;base64,{base64_logo}" style="width: 32px; height: 32px; object-fit: contain;"/>
+        <h2 style="margin:0; font-size:1.5rem; font-weight:700; color:var(--text-primary);">Welcome to Adaptive Workspace</h2>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Horizontal Tabs Layout
+tab_chat, tab_settings = st.tabs(["Chat Workspace", "Settings"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 1: Chat Workspace
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_chat:
+    if not active_chat_id:
+        st.markdown(f"""
+        <div class="hero-container" style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 3rem 1.5rem;">
+            <img src="data:image/png;base64,{base64_logo}" style="width: 80px; height: 80px; object-fit: contain; margin-bottom: 1.5rem; filter: drop-shadow(0 4px 10px rgba(59, 130, 246, 0.25));"/>
+            <div class="hero-title">Adaptive Workspace</div>
+            <div class="hero-subtitle">
+                Select or create a workspace in the sidebar to start chatting with your PDF documents.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Show step-by-step onboarding flow if no messages are present
+        if not st.session_state.messages:
+            st.markdown(f"""
+            <div class="hero-container" style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2.5rem 1.5rem;">
+                <img src="data:image/png;base64,{base64_logo}" style="width: 70px; height: 70px; object-fit: contain; margin-bottom: 1.25rem; filter: drop-shadow(0 4px 10px rgba(59, 130, 246, 0.2));"/>
+                <div class="hero-title">Welcome to Adaptive Workspace</div>
+                <div class="hero-subtitle" style="margin-bottom: 2rem;">
+                    Chat with your documents using advanced retrieval and your preferred AI models.
+                </div>
+                <div class="onboarding-steps" style="display: flex; gap: 1.5rem; justify-content: center; width: 100%; max-width: 800px; text-align: left;">
+                    <div class="onboarding-step-card" style="flex: 1;">
+                        <div class="onboarding-step-icon">1</div>
+                        <div class="onboarding-step-title">Upload Documents</div>
+                        <div class="onboarding-step-desc">Upload document PDFs in the uploader section below</div>
+                    </div>
+                    <div class="onboarding-step-card" style="flex: 1;">
+                        <div class="onboarding-step-icon">2</div>
+                        <div class="onboarding-step-title">Configure Mode</div>
+                        <div class="onboarding-step-desc">Configure your models and keys in Settings if needed</div>
+                    </div>
+                    <div class="onboarding-step-card" style="flex: 1;">
+                        <div class="onboarding-step-icon">3</div>
+                        <div class="onboarding-step-title">Start Chatting</div>
+                        <div class="onboarding-step-desc">Type a prompt to begin your retrieval chat</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        # Render Chat History (ChatGPT Style)
+        # Inject dynamic alignment styles based on settings
+        # Render Chat History (ChatGPT Style)
+        # Default layout styling: User on Right, Assistant on Left
+        st.markdown("""
+        <style>
+        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]),
+        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]),
+        div[data-testid="stChatMessage"]:has(img[alt="user"]),
+        div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) {
+            flex-direction: row-reverse !important;
+        }
+        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageContent"],
+        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageContent"],
+        div[data-testid="stChatMessage"]:has(img[alt="user"]) div[data-testid="stChatMessageContent"],
+        div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) div[data-testid="stChatMessageContent"] {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(99, 102, 241, 0.05) 100%) !important;
+            border: 1px solid rgba(139, 92, 246, 0.2) !important;
+            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.06) !important;
+            margin-right: 0.5rem !important;
+            margin-left: auto !important;
+        }
+        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]),
+        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]),
+        div[data-testid="stChatMessage"]:has(img[alt="assistant"]),
+        div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) {
+            flex-direction: row !important;
+        }
+        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) div[data-testid="stChatMessageContent"],
+        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageContent"],
+        div[data-testid="stChatMessage"]:has(img[alt="assistant"]) div[data-testid="stChatMessageContent"],
+        div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) div[data-testid="stChatMessageContent"] {
+            background: rgba(255, 255, 255, 0.02) !important;
+            border: 1px solid rgba(255, 255, 255, 0.06) !important;
+            margin-left: 0.5rem !important;
+            margin-right: auto !important;
+            text-align: left !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        for msg_idx, msg in enumerate(st.session_state.messages):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"], unsafe_allow_html=True)
+                
+                # Show assistant dashboard (citations + latency logs)
+                if msg["role"] == "assistant":
+                    # Copy & Regenerate action bar
+                    msg_content_escaped = msg["content"].replace("\\", "\\\\").replace("`", "\\`").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")
+                    copy_btn_id = f"copy_btn_{msg_idx}"
+                    st.markdown(f"""
+                    <div class="response-actions">
+                        <button class="response-action-btn" id="{copy_btn_id}" onclick="
+                            navigator.clipboard.writeText(`{msg_content_escaped}`).then(function() {{
+                                var toast = document.createElement('div');
+                                toast.className = 'copy-toast';
+                                toast.textContent = 'Copied to clipboard';
+                                document.body.appendChild(toast);
+                                setTimeout(function() {{ toast.remove(); }}, 2200);
+                            }});
+                        ">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            Copy
+                        </button>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Regenerate button (Streamlit button - triggers rerun)
+                    # Only show on the very last assistant message
+                    if msg_idx == len(st.session_state.messages) - 1:
+                        if st.button("Regenerate", key=f"regen_{msg_idx}", type="secondary"):
+                            # Find the last user query
+                            last_user_query = None
+                            for prev_msg in reversed(st.session_state.messages):
+                                if prev_msg["role"] == "user":
+                                    last_user_query = prev_msg["content"]
+                                    break
+                            if last_user_query:
+                                # Delete the last assistant message from DB
+                                msg_id = msg.get("message_id")
+                                if msg_id:
+                                    db.delete_message(msg_id)
+                                st.session_state.regenerate_query = last_user_query
+                                st.rerun()
+
+                    # 1. Sources Used (collapsed cards grouped by filename)
+                    if msg.get("sources"):
+                        sources_by_file = {}
+                        for src in msg["sources"]:
+                            fname = src.get("filename", "Unknown")
+                            if fname not in sources_by_file:
+                                sources_by_file[fname] = []
+                            sources_by_file[fname].append(src)
+                        
+                        with st.expander(f"Sources Used ({len(msg['sources'])} chunks)", expanded=False):
+                            for fname, chunks in sources_by_file.items():
+                                st.markdown(f"**{fname}**")
+                                for ch in chunks:
+                                    page_val = ch.get("page", 0)
+                                    score_val = ch.get("score", 0.0)
+                                    text_val = ch.get("text", "")
+                                    st.markdown(f"- **Page {page_val}** (Score: {score_val:.2f})")
+                                    st.caption(text_val)
+
+                    # 2. Technical Details Expander (collapsed by default)
+                    with st.expander("Technical Details", expanded=False):
+                        # Trust and Claim metrics hidden to simplify UX
+                                    
+                        if msg.get("trace"):
+                            t = msg["trace"]
+                            st.write(f"**Query Intent / Type**: {t.get('query_type')}")
+                            st.write(f"**Traversal Strategy**: {t.get('traversal_used')}")
+                            st.write(f"**Graph Expansion Depth**: {t.get('graph_depth')}")
+                            
+                            if len(t.get("sub_questions", [])) > 1:
+                                st.write("**Decomposed Sub-Questions:**")
+                                for sq in t.get("sub_questions", []):
+                                    st.markdown(f"- *{sq}*")
+                                    
+                            perf = t.get("performance")
+                            if perf:
+                                st.markdown("**Component execution latency breakdown (ms):**")
+                                for k, name in [
+                                    ("classification_ms", "Intent Classification"),
+                                    ("decomposition_ms", "Query Decomposition"),
+                                    ("hyde_ms", "HyDE Generation"),
+                                    ("retrieval_ms", "Fusion Retrieval"),
+                                    ("graph_expansion_ms", "KG Traversal"),
+                                    ("rerank_ms", "Reranker"),
+                                    ("generation_ms", "LLM Answer Generation")
+                                ]:
+                                    dur = perf.get(k, 0.0)
+                                    if dur > 0.0:
+                                        st.markdown(f"- *{name}*: {dur:.1f} ms")
+
+        # Chat Input Container
+        st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
+        
+        # Display config metrics bar + Attach PDFs on the same line
+        if active_chat:
+            doc_count = len(active_docs)
+            prov_name = active_chat["model_provider"].upper()
+            model_name = active_chat["model_name"]
+            st.markdown(f"""
+            <div class="input-indicator-bar">
+                <span><strong>{doc_count}</strong> documents active</span>
+                <span>&middot;</span>
+                <span>model: <strong>{model_name}</strong> ({prov_name})</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Chat message trigger
+        active_docs = db.list_documents(active_chat_id)
+        input_disabled = (len(active_docs) == 0)
+        
+        prompt_placeholder = "Ask anything about your documents..." if not input_disabled else "Please upload at least one PDF document to enable chat."
+        
+        # Handle regeneration trigger
+        regen_query = st.session_state.get("regenerate_query")
+        if regen_query:
+            st.session_state.regenerate_query = None
+            prompt = regen_query
+            # Don't re-save the user message, it already exists
+        elif prompt := st.chat_input(prompt_placeholder, disabled=input_disabled, key="chat_query"):
+            # Append & Save User Message
+            db.save_message(active_chat_id, "user", prompt)
+            st.session_state.messages.append({"role": "user", "content": prompt})
+        else:
+            prompt = None
+
+        if prompt:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Show thinking indicator
+            thinking_placeholder = st.empty()
+            thinking_placeholder.markdown("""
+            <div class="thinking-indicator">
+                <div class="thinking-dots">
+                    <span></span><span></span><span></span>
+                </div>
+                Thinking...
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Stop button (displayed during generation)
+            stop_col1, stop_col2, stop_col3 = st.columns([4, 2, 4])
+            with stop_col2:
+                if st.button("Stop generating", key="stop_gen_btn", use_container_width=True, type="secondary"):
+                    st.session_state.stop_requested = True
+
+            try:
+                # 1. Inject API keys for the run
+                orig_env = inject_user_api_keys(user_id)
+                
+                # 2. Get active doc names
+                doc_names = [d["doc_name"] for d in active_docs]
+                
+                # settings traversal parameters
+                settings_top_k = st.session_state.get("settings_top_k", 10)
+                settings_depth = st.session_state.get("settings_depth", 1)
+                
+                # Check for stop request
+                if st.session_state.stop_requested:
+                    st.session_state.stop_requested = False
+                    thinking_placeholder.empty()
+                    restore_api_keys(orig_env)
+                    st.info("Generation stopped.")
+                    st.rerun()
+                
+                # 3. Query Execution
+                result = query_all_docs(
+                    query=prompt,
+                    user_id=user_id,
+                    chat_id=active_chat_id,
+                    doc_names=doc_names,
+                    top_k=settings_top_k,
+                    graph_depth=settings_depth,
+                    chat_history=st.session_state.messages,
+                    mode=st.session_state.answering_mode,
+                    active_provider=active_chat["model_provider"],
+                    active_model=active_chat["model_name"]
+                )
+                
+                # 4. Restore API keys
+                restore_api_keys(orig_env)
             except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg or "rate_limit" in error_msg.lower():
-                    st.error(
-                        "⏳ **API rate limit reached.** "
-                        "All models are temporarily exhausted. "
-                        "Try again in ~30 minutes or add a fresh Groq API key."
-                    )
+                thinking_placeholder.empty()
+                try:
+                    restore_api_keys(orig_env)
+                except Exception:
+                    pass
+                err_msg = str(e)
+                if "Failover error" in err_msg or "429" in err_msg or "Rate limit" in err_msg or "Too Many Requests" in err_msg:
+                    st.error("""
+                    ### API Tokens / Rate Limit Exhausted
+                    
+                    It looks like all available API keys or provider connections failed to generate a response. This usually happens when:
+                    
+                    1. **Rate Limits (429 Too Many Requests)**: You have hit the request/token rate limits for your active provider (e.g., Groq).
+                    2. **Exhausted Credits/Token Balance**: Your provider account (e.g., OpenAI, Claude) has run out of credits.
+                    3. **Invalid or Unconfigured API Keys**: Custom API keys are missing, inactive, or invalid.
+                    
+                    **Action Steps:**
+                    - Switch to the **Settings & Analytics** tab to check and register active API keys.
+                    - Select a different LLM Provider (e.g., Gemini or OpenAI) in the sidebar.
+                    - Check the **Provider API Status Monitor** at the bottom of the Settings page.
+                    - Verify your token limits and billing status directly on your provider's developer console.
+                    """)
                 else:
-                    st.error(f"Query failed: {e}")
+                    st.error(f"Workspace generation failed: {e}")
+                st.stop()
+
+            # Clear thinking indicator
+            thinking_placeholder.empty()
+
+            with st.chat_message("assistant"):
+                try:
+                    # 5. Typewriter streaming effect
+                    answer_text = result["answer"]
+                    response_placeholder = st.empty()
+                    
+                    # Stream words with a subtle typewriter effect
+                    words = answer_text.split(" ")
+                    displayed = ""
+                    chunk_size = 3  # Stream 3 words at a time for smooth effect
+                    for i in range(0, len(words), chunk_size):
+                        chunk = " ".join(words[i:i + chunk_size])
+                        displayed += (" " if displayed else "") + chunk
+                        response_placeholder.markdown(displayed + " |", unsafe_allow_html=True)
+                        time.sleep(0.03)
+                    
+                    # Final render without cursor
+                    response_placeholder.markdown(answer_text, unsafe_allow_html=True)
+                    
+                    # 6. Save Answer
+                    db.save_message(
+                        chat_id=active_chat_id,
+                        role="assistant",
+                        content=result["answer"],
+                        sources=result["sources"],
+                        confidence=result["confidence"],
+                        confidence_emoji=result["confidence_emoji"],
+                        grounding_score=result["grounding_score"],
+                        trust_level=result["trust_level"],
+                        hallucination_risk=result["hallucination_risk"],
+                        claims=result["claims"],
+                        trace=result["trace"],
+                        performance=result["performance"]
+                    )
+                    
+                    st.session_state.last_query_metrics = result["performance"]
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Workspace generation failed: {e}")
+
+
+with tab_settings:
+    st.markdown("### Settings & Configuration")
+    
+    # 1. Model Configuration
+    st.markdown("#### Model Configuration")
+    if active_chat:
+        providers_list = ["groq", "openai", "gemini", "claude"]
+        active_prov = active_chat["model_provider"]
+        if active_prov not in providers_list:
+            providers_list.append(active_prov)
+        prov_idx = providers_list.index(active_prov)
+        
+        selected_prov = st.selectbox("LLM Provider", providers_list, index=prov_idx, key="settings_provider_select")
+        
+        from providers import PROVIDER_MODEL_FALLBACKS
+        models_list = PROVIDER_MODEL_FALLBACKS.get(selected_prov, []).copy()
+        active_model = active_chat["model_name"]
+        if active_model not in models_list:
+            models_list.append(active_model)
+        
+        model_idx = models_list.index(active_model) if active_model in models_list else 0
+        selected_model = st.selectbox("Active Model", models_list, index=model_idx, key="settings_model_select")
+        
+        if selected_prov != active_prov or selected_model != active_model:
+            db.update_chat_model(active_chat_id, selected_prov, selected_model)
+            st.success(f"Model updated to {selected_model} ({selected_prov.upper()})")
+            st.rerun()
+    else:
+        st.info("No active chat to configure.")
+
+    st.divider()
+
+    # 3. API Key Management
+    with st.expander("API Key Management"):
+        keys = db.list_api_keys(user_id)
+        if keys:
+            st.markdown("##### Registered API Keys")
+            for k in keys:
+                col_k_details, col_k_status, col_k_del = st.columns([4, 2, 1])
+                with col_k_details:
+                    st.markdown(f"**{k['provider'].upper()}** ({k['nickname']}) · `{k['display_key']}`")
+                with col_k_status:
+                    is_active = st.checkbox("Active", value=(k["is_active"] == 1), key=f"key_active_{k['key_id']}")
+                    if is_active != (k["is_active"] == 1):
+                        db.toggle_api_key(k["key_id"], is_active)
+                        st.rerun()
+                with col_k_del:
+                    if st.button("Delete", key=f"key_del_{k['key_id']}", use_container_width=True):
+                        db.delete_api_key(k["key_id"])
+                        st.rerun()
+        else:
+            st.caption("No custom API keys registered. Falling back to environment variables.")
+            
+        st.markdown("##### Register New API Key")
+        add_prov = st.selectbox("Key Provider", ["groq", "openai", "gemini", "claude"], key="settings_add_prov_select")
+        add_nick = st.text_input("Nickname (e.g. Work Groq)", key="settings_add_nick_input")
+        add_val = st.text_input("API Key Value", type="password", key="settings_add_val_input")
+        
+        test_col, save_col = st.columns(2)
+        with test_col:
+            if st.button("Test Connection", key="btn_test_conn_action"):
+                if not add_val:
+                    st.error("Please enter a key value.")
+                else:
+                    with st.spinner("Testing API connection..."):
+                        try:
+                            if add_prov == "groq":
+                                from providers import GroqProvider
+                                p = GroqProvider("groq", add_val)
+                                res = p.generate("Hello", max_tokens=5)
+                            elif add_prov == "openai":
+                                from providers import OpenAIProvider
+                                p = OpenAIProvider("openai", add_val)
+                                res = p.generate("Hello", max_tokens=5)
+                            elif add_prov == "gemini":
+                                from providers import GeminiProvider
+                                p = GeminiProvider("gemini", add_val)
+                                res = p.generate("Hello", max_tokens=5)
+                            elif add_prov == "claude":
+                                from providers import ClaudeProvider
+                                p = ClaudeProvider("claude", add_val)
+                                res = p.generate("Hello", max_tokens=5)
+                            st.success("Connection successful!")
+                        except Exception as e:
+                            st.error(f"Connection failed: {e}")
+        with save_col:
+            if st.button("Save Key", type="primary", key="btn_save_key_action"):
+                if not add_nick or not add_val:
+                    st.error("Nickname and Key Value are required.")
+                else:
+                    db.add_api_key(user_id, add_prov, add_val, add_nick)
+                    st.success("API Key successfully registered!")
+                    st.rerun()
+
+    # 4. Search & Retrieval Settings
+    with st.expander("Search & Retrieval Parameters"):
+        top_k_val = st.slider("Results per document", 3, 20, value=st.session_state.settings_top_k, key="settings_slider_top_k")
+        depth_val = st.slider("Graph search depth", 0, 3, value=st.session_state.settings_depth, key="settings_slider_depth")
+        st.session_state.settings_top_k = top_k_val
+        st.session_state.settings_depth = depth_val
+
+    # 5. Workspace Controls
+    with st.expander("Workspace Controls"):
+        if active_chat:
+            st.markdown("##### Rename Workspace")
+            new_title = st.text_input("Workspace Title", value=st.session_state.chat_title, key="settings_rename_input_field")
+            if new_title != st.session_state.chat_title and new_title.strip():
+                db.rename_chat(active_chat_id, new_title.strip())
+                st.session_state.chat_title = new_title.strip()
+                st.rerun()
+                
+            st.markdown("##### Danger Zone")
+            if st.button("Delete Workspace", type="primary", use_container_width=True, key="settings_del_workspace_action"):
+                db.delete_chat(active_chat_id)
+                chats = db.list_chats(user_id)
+                st.session_state.active_chat_id = chats[0]["chat_id"] if chats else None
+                st.rerun()
+        else:
+            st.info("No active workspace.")
+
+    # 6. Knowledge Graph Explorer (Developer Tools)
+    with st.expander("Developer Tools: Knowledge Graph Explorer"):
+        if not active_chat_id:
+            st.info("No active chat session. Create a chat to inspect its knowledge graphs.")
+        else:
+            active_docs = db.list_documents(active_chat_id)
+            if not active_docs:
+                st.info("No documents uploaded to this chat. Ingest a document first to see graph statistics.")
+            else:
+                with st.spinner("Loading combined knowledge graphs..."):
+                    builder = get_combined_graph(user_id, active_chat_id, active_docs)
+                    graph = builder.graph
+                    num_nodes = graph.number_of_nodes()
+                    num_edges = graph.number_of_edges()
+                    
+                    if num_nodes > 0:
+                        import networkx as nx
+                        avg_degree = sum(dict(graph.degree()).values()) / num_nodes
+                        density = nx.density(graph)
+                        components = nx.number_connected_components(graph)
+                    else:
+                        avg_degree = 0.0
+                        density = 0.0
+                        components = 0
+                        
+                stat_col1, stat_col2, stat_col3 = st.columns(3)
+                stat_col1.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-val">{num_nodes}</div>
+                    <div class="kpi-label">Total Nodes</div>
+                </div>
+                """, unsafe_allow_html=True)
+                stat_col2.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-val">{num_edges}</div>
+                    <div class="kpi-label">Total Edges</div>
+                </div>
+                """, unsafe_allow_html=True)
+                stat_col3.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-val">{avg_degree:.2f}</div>
+                    <div class="kpi-label">Average Node Degree</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                # Semantic Node Inspector
+                st.markdown("##### Semantic Node Inspector")
+                if num_nodes == 0:
+                    st.caption("No nodes present in graph database to inspect.")
+                else:
+                    nodes_list = list(graph.nodes(data=True))
+                    options = {}
+                    for node_id, data in nodes_list:
+                        text_preview = data.get("text", "")[:40].replace("\n", " ")
+                        options[node_id] = f"{node_id[:8]}... - {data.get('source', '')} (Page {data.get('page', '')}) - {text_preview}"
+                    
+                    # Check session state selected node
+                    if st.session_state.selected_node_id not in options:
+                        st.session_state.selected_node_id = list(options.keys())[0]
+                       
+                    selected_key = st.selectbox(
+                        "Select chunk node to inspect details",
+                        options=list(options.keys()),
+                        format_func=lambda x: options[x],
+                        index=list(options.keys()).index(st.session_state.selected_node_id),
+                        key="settings_inspect_node_select"
+                    )
+                    st.session_state.selected_node_id = selected_key
+                    
+                    node_data = graph.nodes[selected_key]
+                    st.markdown("**Chunk Content Preview**")
+                    st.text_area("Chunk Content", value=node_data.get("text", ""), height=150, disabled=True, label_visibility="collapsed", key="settings_chunk_preview_textarea")
+                    
+                    det_col1, det_col2, det_col3 = st.columns(3)
+                    det_col1.metric("Source PDF File", node_data.get("source", "Unknown"))
+                    det_col2.metric("Page Number", node_data.get("page", "Unknown"))
+                    det_col3.metric("Semantic Type", node_data.get("chunk_type", "text"))
+                    
+                    ent_col1, ent_col2 = st.columns(2)
+                    with ent_col1:
+                        st.markdown("**Extracted Entities**")
+                        ents = node_data.get("entities", [])
+                        if ents:
+                            st.write(", ".join(ents))
+                        else:
+                            st.caption("No entities extracted from this node.")
+                    with ent_col2:
+                        st.markdown("**Keywords**")
+                        kws = node_data.get("keywords", [])
+                        if kws:
+                            st.write(", ".join(kws))
+                        else:
+                            st.caption("No keywords extracted.")
+                    
+                    # Neighbors inspector
+                    st.markdown("##### Neighboring Linked Chunks")
+                    neighbors = list(graph.neighbors(selected_key))
+                    if not neighbors:
+                        st.caption("No semantic edges found for this chunk node.")
+                    else:
+                        for idx, nbr in enumerate(neighbors):
+                            edge = graph[selected_key][nbr]
+                            weight = edge.get("weight", 0.0)
+                            types = edge.get("types", [])
+                            types_str = ", ".join(types)
+                            
+                            nbr_text = graph.nodes[nbr].get("text", "")[:60].replace("\n", " ")
+                            btn_label = f"Jump to Neighbor Node ({weight:.2f} sim | Types: {types_str}): {nbr[:8]}... - {nbr_text}..."
+                            
+                            if st.button(btn_label, key=f"settings_inspect_jump_btn_{idx}_{nbr}", use_container_width=True):
+                                st.session_state.selected_node_id = nbr
+                                st.rerun()
+
+    # 7. Workspace Analytics & Observability
+    with st.expander("Observability & Usage Metrics"):
+        total_docs_count = len(db.list_documents(active_chat_id)) if active_chat_id else 0
+        total_queries = 0
+        all_query_latencies = []
+        if active_chat_id:
+            hist = db.get_chat_history(active_chat_id)
+            for m in hist:
+                if m["role"] == "user":
+                    total_queries += 1
+                elif m["role"] == "assistant":
+                    p = m.get("performance")
+                    if p and isinstance(p, dict) and "total_ms" in p:
+                        all_query_latencies.append(p["total_ms"])
+        avg_latency = np.mean(all_query_latencies) if all_query_latencies else 0.0
+        
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        stat_col1.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-val">{total_docs_count}</div>
+            <div class="kpi-label">Workspace Documents</div>
+        </div>
+        """, unsafe_allow_html=True)
+        stat_col2.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-val">{total_queries}</div>
+            <div class="kpi-label">Workspace Queries</div>
+        </div>
+        """, unsafe_allow_html=True)
+        stat_col3.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-val">{avg_latency / 1000.0:.2f}s</div>
+            <div class="kpi-label">Avg Response Time</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Provider status monitor
+        st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Provider API Status Monitor")
+        health_stats = get_provider_health_stats()
+        h_cols = st.columns(4)
+        for idx, hs in enumerate(health_stats):
+            with h_cols[idx]:
+                if hs["failures"] == 0 and hs["successes"] > 0:
+                    status_text = "<span style='color: #10b981; font-weight: 600;'>Active</span>"
+                elif hs["success_rate"] == 0.0 and hs["failures"] > 0:
+                    status_text = "<span style='color: #ef4444; font-weight: 600;'>Offline</span>"
+                elif hs["failures"] > 0:
+                    status_text = "<span style='color: #f59e0b; font-weight: 600;'>Degraded</span>"
+                else:
+                    status_text = "<span style='color: #6b7280; font-weight: 500;'>Inactive</span>"
+                    
+                st.markdown(f"""
+                <div style="background:rgba(255,255,255,0.01); border:1px solid rgba(255,255,255,0.04); padding: 10px; border-radius: 8px; font-size:0.8rem; display:flex; flex-direction:column;">
+                    <div><strong style="font-size:0.85rem;">{hs['provider'].upper()}</strong></div>
+                    <div style="margin-top:4px; font-size:0.75rem; color:var(--text-secondary);">Status: {status_text}</div>
+                    <div style="font-size:0.75rem; color:var(--text-secondary);">Success Rate: {hs['success_rate']}%</div>
+                    <div style="font-size:0.75rem; color:var(--text-secondary);">Avg Latency: {hs['avg_latency']:.2f}s</div>
+                </div>
+                """, unsafe_allow_html=True)

@@ -37,6 +37,7 @@ class QueryDecomposer:
 
         # 2. Decompose only when beneficial (COMPLEX or RESEARCH)
         try:
+            self.client.api_key = os.environ.get("GROQ_API_KEY") or self.client.api_key
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -62,6 +63,9 @@ Respond with ONLY "SIMPLE" or a valid JSON array. Nothing else."""
                 temperature=0.0,
                 max_tokens=200
             )
+
+            from performance_tracker import PerformanceTracker
+            PerformanceTracker().increment_llm_calls()
 
             result = response.choices[0].message.content.strip()
 
