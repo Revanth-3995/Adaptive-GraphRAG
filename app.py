@@ -137,6 +137,12 @@ section[data-testid="stSidebar"] div[data-testid="stPopover"] button {
     font-weight: 700 !important;
     box-shadow: none !important;
     border-radius: 6px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stPopover"] button svg {
+    display: none !important;
 }
 section[data-testid="stSidebar"] div[data-testid="stPopover"] button:hover {
     color: var(--text-primary) !important;
@@ -1407,7 +1413,7 @@ with st.sidebar:
                         st.session_state.messages = []
                         st.rerun()
                 with col_menu:
-                    with st.popover("⋮", use_container_width=True, help="Chat actions"):
+                    with st.popover("…", use_container_width=True, help="Chat actions"):
                         if st.button("✏️ Rename", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True):
                             st.session_state[rename_key] = True
                             st.rerun()
