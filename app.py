@@ -68,339 +68,337 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 :root {
-    --bg-primary: #0a0c10;
-    --bg-secondary: #13151c;
-    --bg-card: rgba(255, 255, 255, 0.02);
-    --border-color: rgba(255, 255, 255, 0.07);
-    --text-primary: #f3f4f6;
-    --text-secondary: #9ca3af;
-    --text-muted: #6b7280;
-    --accent-primary: #3b82f6;
-    --accent-secondary: #0ea5e9;
-    --success: #10b981;
-    --warning: #f59e0b;
-    --error: #ef4444;
+    --bg-primary: #0d0d0d;
+    --bg-sidebar: #171717;
+    --bg-surface: #212121;
+    --bg-hover: #2f2f2f;
+    --bg-input: #2f2f2f;
+    --border-color: rgba(255, 255, 255, 0.08);
+    --border-light: rgba(255, 255, 255, 0.05);
+    --text-primary: #ececec;
+    --text-secondary: #b4b4b4;
+    --text-muted: #8e8e8e;
+    --text-dim: #666666;
+    --accent: #10a37f;
 }
 
-/* ─── Body and Fonts ─── */
+/* ─── Body ─── */
 .stApp {
     background-color: var(--bg-primary) !important;
-    font-family: 'Inter', sans-serif !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
+.stApp > header { background: transparent !important; }
+div[data-testid="stHeader"] { background: transparent !important; }
+div[data-testid="stDecoration"] { display: none !important; }
+.block-container { padding-top: 1rem !important; max-width: 900px !important; }
 
-h1, h2, h3, h4, h5, h6, .hero-title {
+h1, h2, h3, h4, h5, h6 {
     font-family: 'Inter', sans-serif !important;
-    font-weight: 700 !important;
     color: var(--text-primary) !important;
 }
 
-.stApp > header { background: transparent !important; }
-.block-container { padding-top: 1.5rem !important; }
-
-/* Hide top decoration bar */
-div[data-testid="stHeader"] {
-    background: transparent !important;
-}
-div[data-testid="stDecoration"] {
-    background: transparent !important;
-    display: none !important;
-}
-
 /* ─── Scrollbar ─── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
 
 /* ─── Sidebar ─── */
 section[data-testid="stSidebar"] {
-    background-color: var(--bg-secondary) !important;
-    border-right: 1px solid var(--border-color) !important;
+    background-color: var(--bg-sidebar) !important;
+    border-right: 1px solid var(--border-light) !important;
 }
 section[data-testid="stSidebar"] .stMarkdown p,
 section[data-testid="stSidebar"] .stMarkdown span {
     color: var(--text-secondary) !important;
-    font-size: 0.85rem !important;
+    font-size: 0.82rem !important;
+}
+/* Sidebar action buttons in column rows: subtle by default, visible on hover */
+section[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] div.stButton > button {
+    min-height: 0 !important;
+    padding: 0.15rem 0.3rem !important;
+    font-size: 0.72rem !important;
+    line-height: 1 !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stPopover"] {
+    display: flex !important;
+    justify-content: flex-end !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stPopover"] button {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-dim) !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: 28px !important;
+    height: 28px !important;
+    line-height: 28px !important;
+    font-size: 1.15rem !important;
+    font-weight: 700 !important;
+    box-shadow: none !important;
+    border-radius: 6px !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stPopover"] button:hover {
+    color: var(--text-primary) !important;
+    background: var(--bg-hover) !important;
+}
+div[data-testid="stPopoverBody"] {
+    background-color: #212121 !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 8px !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+    padding: 4px !important;
+    min-width: 140px !important;
+}
+div[data-testid="stPopoverBody"] button {
+    text-align: left !important;
+    justify-content: flex-start !important;
+    background: transparent !important;
+    border: none !important;
+    color: #ececec !important;
+    font-size: 0.82rem !important;
+    padding: 0.4rem 0.75rem !important;
+    border-radius: 6px !important;
+    width: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+div[data-testid="stPopoverBody"] button:hover {
+    background: #2f2f2f !important;
+    color: white !important;
 }
 
-/* ─── Premium Button Overrides ─── */
+/* ─── Buttons ─── */
 div.stButton > button {
     border-radius: 8px !important;
     font-weight: 500 !important;
-    font-size: 0.8rem !important;
-    padding: 0.35rem 0.75rem !important;
-    transition: all 0.15s ease-in-out !important;
+    font-size: 0.82rem !important;
+    padding: 0.45rem 0.85rem !important;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease !important;
+    font-family: 'Inter', sans-serif !important;
+    box-shadow: none !important;
 }
-/* Style primary buttons */
 div.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%) !important;
-    border: none !important;
-    color: white !important;
-    box-shadow: 0 4px 10px rgba(139, 92, 246, 0.2) !important;
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-primary) !important;
 }
 div.stButton > button[kind="primary"]:hover {
-    box-shadow: 0 6px 14px rgba(139, 92, 246, 0.3) !important;
-    transform: translateY(-0.5px);
+    background: var(--bg-hover) !important;
+    border-color: rgba(255, 255, 255, 0.15) !important;
     color: white !important;
+    transform: none !important;
 }
-/* Style secondary buttons */
 div.stButton > button[kind="secondary"] {
-    background: rgba(255, 255, 255, 0.02) !important;
-    border: 1px solid var(--border-color) !important;
-    color: var(--text-secondary) !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    color: var(--text-muted) !important;
 }
 div.stButton > button[kind="secondary"]:hover {
-    background: rgba(255, 255, 255, 0.05) !important;
-    border-color: rgba(139, 92, 246, 0.25) !important;
+    background: var(--bg-hover) !important;
     color: var(--text-primary) !important;
 }
 
-/* ─── Expander Premium styling ─── */
+/* ─── Expander ─── */
 .streamlit-expanderHeader {
-    background-color: rgba(255, 255, 255, 0.01) !important;
-    border: 1px solid var(--border-color) !important;
+    background-color: transparent !important;
+    border: 1px solid var(--border-light) !important;
     border-radius: 8px !important;
-    font-size: 0.85rem !important;
+    font-size: 0.82rem !important;
     font-weight: 500 !important;
-    color: var(--text-primary) !important;
-    margin-bottom: 0.35rem !important;
+    color: var(--text-secondary) !important;
+    margin-bottom: 0.25rem !important;
 }
 .streamlit-expanderContent {
-    background-color: rgba(255, 255, 255, 0.005) !important;
-    border-left: 1px solid var(--border-color) !important;
-    border-right: 1px solid var(--border-color) !important;
-    border-bottom: 1px solid var(--border-color) !important;
+    background-color: transparent !important;
+    border-left: 1px solid var(--border-light) !important;
+    border-right: 1px solid var(--border-light) !important;
+    border-bottom: 1px solid var(--border-light) !important;
     border-radius: 0 0 8px 8px !important;
     padding: 0.75rem 1rem !important;
-    margin-top: -0.4rem !important;
-    margin-bottom: 0.5rem !important;
+    margin-top: -0.35rem !important;
 }
 
-/* ─── Chat bubble avatars ─── */
-div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageAvatar"],
-div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageAvatar"],
-div[data-testid="stChatMessage"]:has(img[alt="user"]) div[data-testid="stChatMessageAvatar"],
-div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) div[data-testid="stChatMessageAvatar"] {
-    background: rgba(139, 92, 246, 0.12) !important;
-    border-color: rgba(139, 92, 246, 0.25) !important;
+/* ─── Chat Messages ─── */
+div[data-testid="stChatMessageAvatar"] {
+    display: none !important;
 }
-div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) div[data-testid="stChatMessageAvatar"],
-div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageAvatar"],
-div[data-testid="stChatMessage"]:has(img[alt="assistant"]) div[data-testid="stChatMessageAvatar"],
-div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) div[data-testid="stChatMessageAvatar"] {
-    background: rgba(99, 102, 241, 0.12) !important;
-    border-color: rgba(99, 102, 241, 0.25) !important;
+div[data-testid="stChatMessage"] {
+    padding: 0.5rem 0 !important;
+    background: transparent !important;
+    border: none !important;
+    gap: 0 !important;
 }
-
-/* Base style for chat message content bubble */
 div[data-testid="stChatMessageContent"] {
-    border-radius: 12px !important;
-    padding: 0.75rem 1.1rem !important;
     color: var(--text-primary) !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+    font-size: 0.92rem !important;
+    line-height: 1.65 !important;
+    max-width: 100% !important;
+    box-shadow: none !important;
+}
+/* User messages: subtle pill */
+div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageContent"],
+div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageContent"],
+div[data-testid="stChatMessage"]:has(img[alt="user"]) div[data-testid="stChatMessageContent"],
+div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) div[data-testid="stChatMessageContent"] {
+    background: var(--bg-hover) !important;
+    border-radius: 18px !important;
+    padding: 0.85rem 1.25rem !important;
+    border: none !important;
     max-width: 82% !important;
+    margin-left: auto !important;
+}
+/* Assistant messages: transparent, no bubble */
+div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) div[data-testid="stChatMessageContent"],
+div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageContent"],
+div[data-testid="stChatMessage"]:has(img[alt="assistant"]) div[data-testid="stChatMessageContent"],
+div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) div[data-testid="stChatMessageContent"] {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0.5rem 0 !important;
+    margin-left: 0 !important;
+    max-width: 100% !important;
+}
+/* User message row: right-align the bubble */
+div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]),
+div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]),
+div[data-testid="stChatMessage"]:has(img[alt="user"]),
+div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) {
+    flex-direction: row-reverse !important;
+    justify-content: flex-start !important;
+}
+/* Assistant message row: left-align */
+div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]),
+div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]),
+div[data-testid="stChatMessage"]:has(img[alt="assistant"]),
+div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) {
+    flex-direction: row !important;
 }
 
-/* ─── Chat input ─── */
+/* ─── Chat Input: Premium Surface Treatment ─── */
 .stChatInput {
     max-width: 800px !important;
     margin: 0 auto !important;
 }
 .stChatInput > div {
-    background: #12141a !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: 12px !important;
+    background: linear-gradient(180deg, #1e2028 0%, #1a1b20 50%, #17181d 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    border-radius: 26px !important;
+    overflow: hidden !important;
+    box-shadow:
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+        0 1px 3px 0 rgba(0, 0, 0, 0.25),
+        0 4px 12px -2px rgba(0, 0, 0, 0.15) !important;
+    transition: border-color 200ms ease-in-out, box-shadow 200ms ease-in-out !important;
 }
-
-/* ─── File uploader ─── */
-[data-testid="stFileUploader"] {
-    background: rgba(255, 255, 255, 0.005) !important;
-    border: 1px dashed rgba(139, 92, 246, 0.2) !important;
-    border-radius: 10px !important;
-    padding: 0.4rem !important;
-    transition: all 0.2s ease !important;
+.stChatInput > div:hover {
+    border-color: rgba(255, 255, 255, 0.14) !important;
 }
-[data-testid="stFileUploader"]:hover {
-    border-color: var(--accent-primary) !important;
-    background: rgba(139, 92, 246, 0.01) !important;
+.stChatInput > div:focus-within {
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    box-shadow:
+        inset 0 1px 0 0 rgba(255, 255, 255, 0.05),
+        0 0 0 2px rgba(59, 130, 246, 0.08),
+        0 1px 3px 0 rgba(0, 0, 0, 0.25) !important;
 }
-
-/* ─── Custom welcome hero onboarding ─── */
-.hero-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 2.5rem 1.5rem;
-    text-align: center;
-    max-width: 680px;
-    margin: 2rem auto;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 14px;
+/* Reset ALL inner elements: strip Streamlit default backgrounds, borders, outlines */
+.stChatInput div,
+.stChatInput form,
+.stChatInput [data-baseweb],
+.stChatInput [data-baseweb] > div {
+    background: transparent !important;
+    border-color: transparent !important;
+    outline: none !important;
+    box-shadow: none !important;
 }
-.hero-title {
-    font-size: 1.8rem;
-    font-weight: 700;
-    margin-bottom: 0.4rem;
+.stChatInput textarea,
+.stChatInput input {
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
     color: var(--text-primary) !important;
+    font-size: 0.9rem !important;
+    font-family: 'Inter', sans-serif !important;
+    padding-left: 10px !important;
+    caret-color: rgba(59, 130, 246, 0.7) !important;
 }
-.hero-subtitle {
-    color: var(--text-secondary);
-    font-size: 0.88rem;
-    line-height: 1.5;
-    margin-bottom: 1.75rem;
-    max-width: 500px;
+.stChatInput textarea:focus,
+.stChatInput input:focus {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
 }
-.onboarding-steps {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    width: 100%;
-    margin-top: 0.5rem;
+.stChatInput textarea::placeholder {
+    color: rgba(255, 255, 255, 0.28) !important;
 }
-.onboarding-step-card {
-    background: rgba(255, 255, 255, 0.015);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    padding: 1rem 0.75rem;
-    text-align: center;
-}
-.onboarding-step-icon {
-    font-size: 1.5rem;
-    margin-bottom: 0.4rem;
-}
-.onboarding-step-title {
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 0.2rem;
-    font-size: 0.85rem;
-}
-.onboarding-step-desc {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    line-height: 1.3;
-}
-
-/* Document cards in sidebar */
-.document-card {
-    background: rgba(255, 255, 255, 0.015);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 0.45rem 0.6rem;
-    margin-bottom: 0.4rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-.document-title {
-    font-size: 0.78rem;
-    font-weight: 500;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 170px;
-}
-.document-meta {
-    font-size: 0.68rem;
-    color: var(--text-muted);
-}
-
-/* Compact stats badges in header */
-.header-badge-container {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 0.25rem;
-}
-.header-badge {
-    background: rgba(255, 255, 255, 0.02) !important;
-    color: var(--text-secondary) !important;
-    border: 1px solid var(--border-color) !important;
-    padding: 2px 8px !important;
-    border-radius: 6px !important;
-    font-size: 0.7rem !important;
-    font-weight: 500 !important;
-}
-
-/* KPI metric cards inside settings/analytics */
-.kpi-card {
-    background: rgba(255, 255, 255, 0.01);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    padding: 1rem;
-    text-align: center;
-}
-.kpi-val {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--accent-primary);
-    margin-bottom: 0.15rem;
-}
-.kpi-label {
-    font-size: 0.68rem;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-}
-
-/* Badges styling */
-.badge-fast {
-    background: rgba(16, 185, 129, 0.08) !important;
-    color: #34d399 !important;
-    border: 1px solid rgba(16, 185, 129, 0.15) !important;
-    padding: 2px 8px !important;
-    border-radius: 6px !important;
-    font-size: 0.7rem !important;
-    font-weight: 600 !important;
-}
-.badge-verified {
-    background: rgba(14, 165, 233, 0.08) !important;
-    color: #38bdf8 !important;
-    border: 1px solid rgba(14, 165, 233, 0.15) !important;
-    padding: 2px 8px !important;
-    border-radius: 6px !important;
-    font-size: 0.7rem !important;
-    font-weight: 600 !important;
-}
-
-/* Inline badges above text input */
-.input-indicator-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    max-width: 800px;
-    margin: 0.4rem auto;
-    font-size: 0.74rem;
-    color: var(--text-muted);
-}
-
-
-
-/* ─── Circular Send Button Override ─── */
+/* Send button – embedded inside the bar */
 .stChatInput button[kind="primary"],
 .stChatInput button[data-testid="stChatInputSubmitButton"] {
     border-radius: 50% !important;
-    width: 36px !important;
-    height: 36px !important;
-    min-width: 36px !important;
-    min-height: 36px !important;
+    width: 32px !important;
+    height: 32px !important;
+    min-width: 32px !important;
+    min-height: 32px !important;
+    max-width: 32px !important;
+    max-height: 32px !important;
     padding: 0 !important;
-    display: flex !important;
+    margin: 4px 8px 4px 2px !important;
+    display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    background: linear-gradient(135deg, #3b82f6 0%, #0ea5e9 100%) !important;
+    background: #e5e5e5 !important;
     border: none !important;
-    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3) !important;
-    transition: all 0.2s ease !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2) !important;
+    transition: transform 200ms ease-in-out, background 200ms ease-in-out, box-shadow 200ms ease-in-out !important;
     flex-shrink: 0 !important;
 }
 .stChatInput button[kind="primary"]:hover,
 .stChatInput button[data-testid="stChatInputSubmitButton"]:hover {
-    transform: scale(1.08) !important;
-    box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4) !important;
+    background: white !important;
+    transform: scale(1.02) !important;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.25) !important;
 }
+.stChatInput button svg { color: #0d0d0d !important; }
+
+/* ─── File Uploader ─── */
+[data-testid="stFileUploader"] {
+    background: transparent !important;
+    border: 1px dashed var(--border-color) !important;
+    border-radius: 10px !important;
+    padding: 0.4rem !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+/* ─── Tabs ─── */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0 !important;
+    background: transparent !important;
+    border-bottom: 1px solid var(--border-light) !important;
+}
+.stTabs [data-baseweb="tab"] {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    color: var(--text-dim) !important;
+    padding: 0.6rem 1.25rem !important;
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    transition: color 0.12s ease !important;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    color: var(--text-primary) !important;
+    border-bottom-color: var(--text-primary) !important;
+    background: transparent !important;
+}
+.stTabs [data-baseweb="tab"]:hover { color: var(--text-secondary) !important; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: var(--text-primary) !important; }
+.stTabs [data-baseweb="tab-border"] { display: none !important; }
 
 /* ─── Thinking Indicator ─── */
 @keyframes dotPulse {
@@ -408,78 +406,130 @@ div[data-testid="stChatMessageContent"] {
     40% { opacity: 1; transform: scale(1); }
 }
 .thinking-indicator {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0.6rem 1rem;
-    color: var(--text-secondary);
-    font-size: 0.82rem;
-    font-weight: 500;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0.6rem 0; color: var(--text-muted);
+    font-size: 0.82rem; font-weight: 400;
 }
-.thinking-dots {
-    display: flex;
-    gap: 4px;
-}
+.thinking-dots { display: flex; gap: 4px; }
 .thinking-dots span {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent-primary);
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--text-muted);
     animation: dotPulse 1.4s infinite ease-in-out both;
 }
 .thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
 .thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
 .thinking-dots span:nth-child(3) { animation-delay: 0s; }
 
-/* ─── Response Action Bar (Copy / Regenerate) ─── */
+/* ─── Response Actions ─── */
 .response-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin-top: 0.5rem;
-    padding-top: 0.35rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    display: flex; align-items: center; gap: 2px;
+    margin-top: 0.4rem; padding-top: 0.2rem;
 }
 .response-action-btn {
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 6px;
-    font-size: 0.75rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    transition: all 0.15s ease;
+    background: transparent; border: none; color: var(--text-dim);
+    cursor: pointer; padding: 4px 8px; border-radius: 6px;
+    font-size: 0.75rem; display: inline-flex; align-items: center; gap: 4px;
+    transition: color 0.12s ease, background 0.12s ease;
 }
-.response-action-btn:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: var(--text-primary);
-}
-.response-action-btn svg {
-    width: 14px;
-    height: 14px;
-}
+.response-action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.response-action-btn svg { width: 14px; height: 14px; }
 .copy-toast {
-    position: fixed;
-    bottom: 80px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(16, 185, 129, 0.9);
-    color: white;
-    padding: 8px 16px;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    font-weight: 500;
-    z-index: 9999;
-    animation: toastFade 2s ease forwards;
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-surface); color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 500;
+    z-index: 9999; animation: toastFade 2s ease forwards;
 }
 @keyframes toastFade {
     0% { opacity: 0; transform: translateX(-50%) translateY(10px); }
     15% { opacity: 1; transform: translateX(-50%) translateY(0); }
     70% { opacity: 1; }
     100% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+}
+
+/* ─── Welcome Hero ─── */
+.hero-container {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 3rem 1.5rem; text-align: center; max-width: 600px; margin: 3rem auto;
+    background: transparent !important; border: none !important;
+}
+.hero-title {
+    font-size: 1.5rem; font-weight: 600; margin-bottom: 0.4rem;
+    color: var(--text-primary) !important;
+}
+.hero-subtitle {
+    color: var(--text-muted); font-size: 0.88rem; line-height: 1.6;
+    margin-bottom: 1.5rem; max-width: 460px;
+}
+.onboarding-steps {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 12px; width: 100%; margin-top: 0.5rem;
+}
+.onboarding-step-card {
+    background: var(--bg-surface); border: 1px solid var(--border-light);
+    border-radius: 12px; padding: 1.25rem 1rem; text-align: center;
+    transition: border-color 0.2s ease;
+}
+.onboarding-step-card:hover { border-color: rgba(255,255,255,0.12); }
+.onboarding-step-icon { font-size: 1.2rem; margin-bottom: 0.5rem; color: var(--text-muted); }
+.onboarding-step-title { font-weight: 600; color: var(--text-primary); font-size: 0.82rem; margin-bottom: 0.2rem; }
+.onboarding-step-desc { font-size: 0.72rem; color: var(--text-muted); line-height: 1.4; }
+
+/* ─── Document cards ─── */
+.document-card {
+    background: var(--bg-surface); border: 1px solid var(--border-light);
+    border-radius: 8px; padding: 0.4rem 0.6rem; margin-bottom: 0.35rem;
+    display: flex; align-items: center; justify-content: space-between;
+}
+.document-title {
+    font-size: 0.78rem; font-weight: 500; color: var(--text-primary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;
+}
+.document-meta { font-size: 0.68rem; color: var(--text-dim); }
+
+/* ─── Header badges (simplified) ─── */
+.header-badge-container { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 0.2rem; }
+.header-badge {
+    background: transparent !important; color: var(--text-dim) !important;
+    border: none !important; padding: 0 !important;
+    font-size: 0.72rem !important; font-weight: 400 !important;
+}
+
+/* ─── KPI cards ─── */
+.kpi-card {
+    background: var(--bg-surface); border: 1px solid var(--border-light);
+    border-radius: 12px; padding: 1.25rem; text-align: center;
+}
+.kpi-val { font-size: 1.5rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.15rem; }
+.kpi-label { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* Badges */
+.badge-fast {
+    background: rgba(16, 185, 129, 0.06) !important; color: #34d399 !important;
+    border: 1px solid rgba(16, 185, 129, 0.12) !important;
+    padding: 2px 8px !important; border-radius: 6px !important;
+    font-size: 0.7rem !important; font-weight: 500 !important;
+}
+.badge-verified {
+    background: rgba(14, 165, 233, 0.06) !important; color: #38bdf8 !important;
+    border: 1px solid rgba(14, 165, 233, 0.12) !important;
+    padding: 2px 8px !important; border-radius: 6px !important;
+    font-size: 0.7rem !important; font-weight: 500 !important;
+}
+
+/* Input indicator bar */
+.input-indicator-bar {
+    display: flex; align-items: center; gap: 6px;
+    max-width: 800px; margin: 0.3rem auto; justify-content: center;
+    font-size: 0.72rem; color: var(--text-dim);
+}
+
+/* ─── Select boxes & inputs ─── */
+div[data-testid="stSelectbox"] label,
+div[data-testid="stNumberInput"] label,
+div[data-testid="stTextInput"] label {
+    color: var(--text-secondary) !important;
+    font-size: 0.82rem !important;
 }
 </style>
 
@@ -1201,17 +1251,14 @@ else:
 # =============================================================================
 with st.sidebar:
     st.markdown(f"""
-    <div style="display:flex; align-items:center; gap:10px; padding: 0.5rem 0; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border-color);">
-        <img src="data:image/png;base64,{base64_logo}" style="width: 28px; height: 28px; border-radius: 4px; object-fit: contain;"/>
-        <div>
-            <div style="font-size:1.15rem; font-weight:700; color:#f3f4f6; line-height:1.2;">Adaptive Workspace</div>
-            <div style="font-size:0.72rem; color:#6b7280; margin-top:1px;">Personal AI Assistant</div>
-        </div>
+    <div style="display:flex; align-items:center; gap:10px; padding: 0.6rem 0; margin-bottom: 0.75rem;">
+        <img src="data:image/png;base64,{base64_logo}" style="width: 24px; height: 24px; border-radius: 4px; object-fit: contain;"/>
+        <div style="font-size:0.95rem; font-weight:600; color:#ececec; letter-spacing: -0.01em;">Adaptive Workspace</div>
     </div>
     """, unsafe_allow_html=True)
     
     # 1. New Chat Button (Proper creation & Auto-Cleanup)
-    if st.button("New Chat", use_container_width=True, type="primary", key="btn_new_chat"):
+    if st.button("＋  New chat", use_container_width=True, type="primary", key="btn_new_chat"):
         # Auto-delete active workspace if it has 0 messages (no questions asked)
         if active_chat_id:
             history = db.get_chat_history(active_chat_id)
@@ -1235,7 +1282,7 @@ with st.sidebar:
         st.rerun()
 
     # 2. Documents Section
-    st.markdown("<div style='margin-top: 1.25rem; margin-bottom: 0.5rem; font-size: 0.72rem; font-weight: 700; color: #6b7280; letter-spacing: 0.05em;'>DOCUMENTS</div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-top: 1rem; margin-bottom: 0.4rem; font-size: 0.68rem; font-weight: 600; color: #666; letter-spacing: 0.06em; text-transform: uppercase;'>Documents</div>", unsafe_allow_html=True)
     if not active_chat_id:
         st.caption("No active workspace.")
         active_docs = []
@@ -1312,7 +1359,7 @@ with st.sidebar:
 
     # 4. Chronological Chats switching (Bottom of sidebar) - Show all chats with inline Rename and Delete
     if chats:
-        st.markdown("<div style='margin-top: 1.5rem; margin-bottom: 0.5rem; font-size: 0.72rem; font-weight: 700; color: #6b7280; letter-spacing: 0.05em;'>CONVERSATIONS</div>", unsafe_allow_html=True)
+        st.markdown("<div style='margin-top: 1.25rem; margin-bottom: 0.4rem; font-size: 0.68rem; font-weight: 600; color: #666; letter-spacing: 0.06em; text-transform: uppercase;'>Chats</div>", unsafe_allow_html=True)
         for c in chats:
             is_active = (c["chat_id"] == active_chat_id)
             btn_type = "primary" if is_active else "secondary"
@@ -1343,9 +1390,9 @@ with st.sidebar:
                         st.session_state[rename_key] = False
                         st.rerun()
             else:
-                col_chat, col_ren, col_del = st.columns([7, 1.5, 1.5])
+                col_chat, col_menu = st.columns([8.2, 1.8])
                 with col_chat:
-                    if st.button(f"💬 {title}", key=f"chat_nav_sidebar_{c['chat_id']}", use_container_width=True, type=btn_type):
+                    if st.button(f"{title}", key=f"chat_nav_sidebar_{c['chat_id']}", use_container_width=True, type=btn_type):
                         # Auto-delete previous active workspace if switching away and it has 0 messages
                         if active_chat_id and active_chat_id != c["chat_id"]:
                             history = db.get_chat_history(active_chat_id)
@@ -1359,37 +1406,38 @@ with st.sidebar:
                         st.session_state.chat_title = c["title"]
                         st.session_state.messages = []
                         st.rerun()
-                with col_ren:
-                    if st.button("✏️", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True, help="Rename Workspace"):
-                        st.session_state[rename_key] = True
-                        st.rerun()
-                with col_del:
-                    if st.button("🗑️", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True, help="Delete Workspace"):
-                        # Delete from database
-                        db.delete_chat(c["chat_id"])
-                        
-                        # Clean up local workspace files
-                        chat_dir = f"doc_store/users/{user_id}/chats/{c['chat_id']}"
-                        shutil.rmtree(chat_dir, ignore_errors=True)
-                        get_doc_system.clear()
-                        
-                        # Handle redirect if the deleted chat was the active one
-                        if c["chat_id"] == active_chat_id:
-                            remaining_chats = db.list_chats(user_id)
-                            st.session_state.active_chat_id = remaining_chats[0]["chat_id"] if remaining_chats else None
-                            st.session_state.chat_title = remaining_chats[0]["title"] if remaining_chats else None
-                        st.rerun()
+                with col_menu:
+                    with st.popover("⋮", use_container_width=True, help="Chat actions"):
+                        if st.button("✏️ Rename", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True):
+                            st.session_state[rename_key] = True
+                            st.rerun()
+                        if st.button("🗑️ Delete", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True):
+                            # Delete from database
+                            db.delete_chat(c["chat_id"])
+                            
+                            # Clean up local workspace files
+                            chat_dir = f"doc_store/users/{user_id}/chats/{c['chat_id']}"
+                            shutil.rmtree(chat_dir, ignore_errors=True)
+                            get_doc_system.clear()
+                            
+                            # Handle redirect if the deleted chat was the active one
+                            if c["chat_id"] == active_chat_id:
+                                remaining_chats = db.list_chats(user_id)
+                                st.session_state.active_chat_id = remaining_chats[0]["chat_id"] if remaining_chats else None
+                                st.session_state.chat_title = remaining_chats[0]["title"] if remaining_chats else None
+                            st.rerun()
 
     # 5. User Profile Footer & Logout
-    st.markdown("---")
-    prof_col1, prof_col2 = st.columns([1, 3])
+    st.markdown("<div style='border-top: 1px solid rgba(255,255,255,0.05); margin-top: 1rem;'></div>", unsafe_allow_html=True)
+    prof_col1, prof_col2 = st.columns([1, 5])
     with prof_col1:
+        initials = user['display_name'][0].upper() if user.get('display_name') else 'U'
         if user.get("profile_picture"):
-            st.image(user["profile_picture"], width=30)
+            st.image(user["profile_picture"], width=28)
         else:
-            st.markdown("<div style='width:30px; height:30px; border-radius:50%; background:#3b82f6; text-align:center; line-height:30px; color:white; font-weight:bold; font-size: 0.8rem;'>U</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='width:28px; height:28px; border-radius:50%; background:#2f2f2f; border: 1px solid rgba(255,255,255,0.1); text-align:center; line-height:28px; color:#b4b4b4; font-weight:600; font-size: 0.72rem;'>{initials}</div>", unsafe_allow_html=True)
     with prof_col2:
-        st.markdown(f"<div style='font-weight:600; color:#f3f4f6; font-size:0.8rem; line-height:30px;'>{user['display_name']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-weight:500; color:#b4b4b4; font-size:0.78rem; line-height:28px;'>{user['display_name']}</div>", unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -1405,21 +1453,19 @@ else:
 if active_chat:
     docs_count = len(db.list_documents(active_chat_id))
     chat_title = st.session_state.get("chat_title", active_chat["title"])
+    prov_upper = active_chat['model_provider'].upper()
+    model_name = active_chat['model_name']
     st.markdown(f"""
-    <div style="margin-bottom:1rem; border-bottom:1px solid var(--border-color); padding-bottom:0.75rem;">
-        <h2 style="margin:0; font-size:1.5rem; font-weight:700; color:var(--text-primary);">{chat_title}</h2>
-        <div class="header-badge-container">
-            <span class="header-badge">Documents: {docs_count}</span>
-            <span class="header-badge">Model: {active_chat['model_name']}</span>
-            <span class="header-badge">Provider: {active_chat['model_provider'].upper()}</span>
-        </div>
+    <div style="margin-bottom:0.75rem; padding-bottom:0.5rem;">
+        <h2 style="margin:0; font-size:1.25rem; font-weight:600; color:var(--text-primary);">{chat_title}</h2>
+        <div style="font-size:0.72rem; color:#666; margin-top:0.2rem;">{docs_count} docs · {model_name} · {prov_upper}</div>
     </div>
     """, unsafe_allow_html=True)
 else:
     st.markdown(f"""
-    <div style="display:flex; align-items:center; gap:10px; margin-bottom:0.5rem;">
-        <img src="data:image/png;base64,{base64_logo}" style="width: 32px; height: 32px; object-fit: contain;"/>
-        <h2 style="margin:0; font-size:1.5rem; font-weight:700; color:var(--text-primary);">Welcome to Adaptive Workspace</h2>
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:0.5rem;">
+        <img src="data:image/png;base64,{base64_logo}" style="width: 28px; height: 28px; object-fit: contain; opacity: 0.8;"/>
+        <h2 style="margin:0; font-size:1.25rem; font-weight:600; color:var(--text-primary);">Welcome to Adaptive Workspace</h2>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1482,46 +1528,7 @@ with tab_chat:
             </div>
             """, unsafe_allow_html=True)
             
-        # Render Chat History (ChatGPT Style)
-        # Inject dynamic alignment styles based on settings
-        # Render Chat History (ChatGPT Style)
-        # Default layout styling: User on Right, Assistant on Left
-        st.markdown("""
-        <style>
-        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]),
-        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]),
-        div[data-testid="stChatMessage"]:has(img[alt="user"]),
-        div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) {
-            flex-direction: row-reverse !important;
-        }
-        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageContent"],
-        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) div[data-testid="stChatMessageContent"],
-        div[data-testid="stChatMessage"]:has(img[alt="user"]) div[data-testid="stChatMessageContent"],
-        div[data-testid="stChatMessage"]:has(svg[aria-label="user"]) div[data-testid="stChatMessageContent"] {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(99, 102, 241, 0.05) 100%) !important;
-            border: 1px solid rgba(139, 92, 246, 0.2) !important;
-            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.06) !important;
-            margin-right: 0.5rem !important;
-            margin-left: auto !important;
-        }
-        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]),
-        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]),
-        div[data-testid="stChatMessage"]:has(img[alt="assistant"]),
-        div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) {
-            flex-direction: row !important;
-        }
-        div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) div[data-testid="stChatMessageContent"],
-        div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) div[data-testid="stChatMessageContent"],
-        div[data-testid="stChatMessage"]:has(img[alt="assistant"]) div[data-testid="stChatMessageContent"],
-        div[data-testid="stChatMessage"]:has(svg[aria-label="assistant"]) div[data-testid="stChatMessageContent"] {
-            background: rgba(255, 255, 255, 0.02) !important;
-            border: 1px solid rgba(255, 255, 255, 0.06) !important;
-            margin-left: 0.5rem !important;
-            margin-right: auto !important;
-            text-align: left !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+        # Chat message alignment is handled by main CSS block
 
         for msg_idx, msg in enumerate(st.session_state.messages):
             with st.chat_message(msg["role"]):
