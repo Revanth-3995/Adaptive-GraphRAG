@@ -163,16 +163,59 @@ div[data-testid="stPopoverBody"] button {
     border: none !important;
     color: #ececec !important;
     font-size: 0.82rem !important;
-    padding: 0.4rem 0.75rem !important;
+    padding: 0.4rem 0.75rem 0.4rem 2.2rem !important;
     border-radius: 6px !important;
     width: 100% !important;
     display: flex !important;
     align-items: center !important;
     gap: 8px !important;
+    position: relative !important;
 }
 div[data-testid="stPopoverBody"] button:hover {
     background: #2f2f2f !important;
     color: white !important;
+}
+/* Vector SVG mask icons matching ChatGPT style */
+div[data-testid="stPopoverBody"] button:nth-of-type(1)::before {
+    content: "" !important;
+    position: absolute !important;
+    left: 12px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    width: 14px !important;
+    height: 14px !important;
+    background-color: var(--text-secondary) !important;
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><path d='M12 20h9'/><path d='M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z'/></svg>") no-repeat center !important;
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><path d='M12 20h9'/><path d='M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z'/></svg>") no-repeat center !important;
+    -webkit-mask-size: contain !important;
+    mask-size: contain !important;
+}
+div[data-testid="stPopoverBody"] button:nth-of-type(1):hover::before {
+    background-color: white !important;
+}
+div[data-testid="stPopoverBody"] button:nth-of-type(2) {
+    color: #f87171 !important;
+}
+div[data-testid="stPopoverBody"] button:nth-of-type(2)::before {
+    content: "" !important;
+    position: absolute !important;
+    left: 12px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    width: 14px !important;
+    height: 14px !important;
+    background-color: #f87171 !important;
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><polyline points='3 6 5 6 21 6'/><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><line x1='10' y1='11' x2='10' y2='17'/><line x1='14' y1='11' x2='14' y2='17'/></svg>") no-repeat center !important;
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><polyline points='3 6 5 6 21 6'/><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><line x1='10' y1='11' x2='10' y2='17'/><line x1='14' y1='11' x2='14' y2='17'/></svg>") no-repeat center !important;
+    -webkit-mask-size: contain !important;
+    mask-size: contain !important;
+}
+div[data-testid="stPopoverBody"] button:nth-of-type(2):hover {
+    background: rgba(248, 113, 113, 0.08) !important;
+    color: #fca5a5 !important;
+}
+div[data-testid="stPopoverBody"] button:nth-of-type(2):hover::before {
+    background-color: #fca5a5 !important;
 }
 
 /* ─── Buttons ─── */
@@ -1414,10 +1457,10 @@ with st.sidebar:
                         st.rerun()
                 with col_menu:
                     with st.popover("…", use_container_width=True, help="Chat actions"):
-                        if st.button("✏️ Rename", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True):
+                        if st.button("Rename", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True):
                             st.session_state[rename_key] = True
                             st.rerun()
-                        if st.button("🗑️ Delete", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True):
+                        if st.button("Delete", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True):
                             # Delete from database
                             db.delete_chat(c["chat_id"])
                             
