@@ -175,7 +175,7 @@ div[data-testid="stPopoverBody"] button:hover {
     color: white !important;
 }
 /* Vector SVG mask icons matching ChatGPT style */
-div[data-testid="stPopoverBody"] button:nth-of-type(1)::before {
+div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] > div:nth-child(1) button::before {
     content: "" !important;
     position: absolute !important;
     left: 12px !important;
@@ -189,13 +189,13 @@ div[data-testid="stPopoverBody"] button:nth-of-type(1)::before {
     -webkit-mask-size: contain !important;
     mask-size: contain !important;
 }
-div[data-testid="stPopoverBody"] button:nth-of-type(1):hover::before {
+div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] > div:nth-child(1) button:hover::before {
     background-color: white !important;
 }
-div[data-testid="stPopoverBody"] button:nth-of-type(2) {
+div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] > div:nth-child(2) button {
     color: #f87171 !important;
 }
-div[data-testid="stPopoverBody"] button:nth-of-type(2)::before {
+div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] > div:nth-child(2) button::before {
     content: "" !important;
     position: absolute !important;
     left: 12px !important;
@@ -204,16 +204,16 @@ div[data-testid="stPopoverBody"] button:nth-of-type(2)::before {
     width: 14px !important;
     height: 14px !important;
     background-color: #f87171 !important;
-    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><polyline points='3 6 5 6 21 6'/><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><line x1='10' y1='11' x2='10' y2='17'/><line x1='14' y1='11' x2='14' y2='17'/></svg>") no-repeat center !important;
-    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><polyline points='3 6 5 6 21 6'/><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><line x1='10' y1='11' x2='10' y2='17'/><line x1='14' y1='11' x2='14' y2='17'/></svg>") no-repeat center !important;
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><path d='M3 6h18'/><path d='M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6'/><path d='M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2'/><line x1='10' x2='10' y1='11' y2='17'/><line x1='14' x2='14' y1='11' y2='17'/></svg>") no-repeat center !important;
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><path d='M3 6h18'/><path d='M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6'/><path d='M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2'/><line x1='10' x2='10' y1='11' y2='17'/><line x1='14' x2='14' y1='11' y2='17'/></svg>") no-repeat center !important;
     -webkit-mask-size: contain !important;
     mask-size: contain !important;
 }
-div[data-testid="stPopoverBody"] button:nth-of-type(2):hover {
+div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] > div:nth-child(2) button:hover {
     background: rgba(248, 113, 113, 0.08) !important;
     color: #fca5a5 !important;
 }
-div[data-testid="stPopoverBody"] button:nth-of-type(2):hover::before {
+div[data-testid="stPopoverBody"] div[data-testid="stVerticalBlock"] > div:nth-child(2) button:hover::before {
     background-color: #fca5a5 !important;
 }
 
