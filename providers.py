@@ -482,7 +482,9 @@ class MultiProviderManager:
         active_keys = [k for k in self.keys if k["provider"] == target_provider and k.get("is_active", 1) == 1]
         providers = []
         for key in active_keys:
-            key_val = key["decrypted_key"]
+            key_val = key.get("decrypted_key", "").strip()
+            if not key_val:
+                continue
             if target_provider == "groq":
                 providers.append(GroqProvider(target_provider, key_val))
             elif target_provider == "openai":

@@ -560,8 +560,10 @@ def inject_user_api_keys(user_id: str) -> dict:
     for k in keys:
         if k["is_active"] != 1:
             continue
+        decrypted = k.get("decrypted_key", "").strip()
+        if not decrypted:
+            continue
         p = k["provider"]
-        decrypted = k["decrypted_key"]
         
         env_names = []
         if p == "groq":
@@ -1031,6 +1033,69 @@ def delete_doc(user_id: str, chat_id: str, document_id: str, doc_name: str):
 
 
 # -----------------------------------------------------------------------------
+# 10.1 HELPERS: resolve_unique_title() & generate_workspace_title()
+# -----------------------------------------------------------------------------
+def resolve_unique_title(user_id: str, base_title: str) -> str:
+    chats = db.list_chats(user_id)
+    existing_titles = {c["title"].lower() for c in chats}
+    
+    if base_title.lower() not in existing_titles:
+        return base_title
+        
+    suffix = 1
+    while True:
+        candidate = f"{base_title} ({suffix})"
+        if candidate.lower() not in existing_titles:
+            return candidate
+        suffix += 1
+
+
+def generate_workspace_title(user_id: str, query: str, active_chat: dict) -> str:
+    # 1. Fallback text title (first 5 words)
+    words = query.strip().split()
+    fallback_title = " ".join(words[:5]) if len(words) > 5 else " ".join(words)
+    if len(fallback_title) > 30:
+        fallback_title = fallback_title[:27] + "..."
+    
+    if active_chat:
+        provider = active_chat["model_provider"]
+        model = active_chat["model_name"]
+    else:
+        provider = "groq"
+        model = "llama-3.3-70b-versatile"
+        
+    try:
+        from providers import MultiProviderManager
+        provider_manager = MultiProviderManager(db.list_api_keys(user_id))
+        
+        prompt = (
+            "Summarize the following user query into an extremely short, concise title (maximum 3 to 4 words). "
+            "Do not include quotes, markdown formatting, or any introductory text.\n\n"
+            f"Query: {query}\n\nTitle:"
+        )
+        
+        raw_title, _, _ = provider_manager.generate(
+            prompt=prompt,
+            target_provider=provider,
+            model=model,
+            max_tokens=15,
+            temperature=0.1
+        )
+        
+        # Clean up the generated title
+        clean_title = raw_title.strip().replace('"', '').replace("'", "").replace(".", "").split("\n")[0].strip()
+        if clean_title.lower().startswith("title:"):
+            clean_title = clean_title[6:].strip()
+            
+        if clean_title and len(clean_title) <= 40:
+            return clean_title
+    except Exception:
+        pass
+        
+    return fallback_title
+
+
+# -----------------------------------------------------------------------------
 # 11. HELPER: get_combined_graph()
 # -----------------------------------------------------------------------------
 def get_combined_graph(user_id: str, chat_id: str, docs: list) -> GraphBuilder:
@@ -1126,6 +1191,9 @@ if active_chat:
     if "chat_title" not in st.session_state or st.session_state.get("last_chat_id") != active_chat_id:
         st.session_state.chat_title = active_chat["title"]
         st.session_state.last_chat_id = active_chat_id
+else:
+    st.session_state.chat_title = None
+    st.session_state.last_chat_id = None
 
 
 # =============================================================================
@@ -1142,12 +1210,27 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    # 1. New Chat Button (Visual Reset)
+    # 1. New Chat Button (Proper creation & Auto-Cleanup)
     if st.button("New Chat", use_container_width=True, type="primary", key="btn_new_chat"):
+        # Auto-delete active workspace if it has 0 messages (no questions asked)
         if active_chat_id:
-            db.clear_chat_history(active_chat_id)
-            db.rename_chat(active_chat_id, "New Chat")
-            st.session_state.chat_title = "New Chat"
+            history = db.get_chat_history(active_chat_id)
+            if not history:
+                db.delete_chat(active_chat_id)
+                chat_dir = f"doc_store/users/{user_id}/chats/{active_chat_id}"
+                shutil.rmtree(chat_dir, ignore_errors=True)
+                get_doc_system.clear()
+
+        if active_chat:
+            provider = active_chat["model_provider"]
+            model = active_chat["model_name"]
+        else:
+            provider = "groq"
+            model = "llama-3.3-70b-versatile"
+        
+        new_chat = db.create_chat(user_id, "New Chat", provider, model)
+        st.session_state.active_chat_id = new_chat["chat_id"]
+        st.session_state.chat_title = new_chat["title"]
         st.session_state.messages = []
         st.rerun()
 
@@ -1227,20 +1310,75 @@ with st.sidebar:
                     st.session_state.show_uploader = False
                     st.rerun()
 
-    # 4. Chronological Chats switching (Bottom of sidebar) - Only show when there is actual history or multiple chats
-    show_conversations = len(chats) > 1 or (len(chats) == 1 and chats[0]["title"] != "New Chat")
-    if show_conversations:
+    # 4. Chronological Chats switching (Bottom of sidebar) - Show all chats with inline Rename and Delete
+    if chats:
         st.markdown("<div style='margin-top: 1.5rem; margin-bottom: 0.5rem; font-size: 0.72rem; font-weight: 700; color: #6b7280; letter-spacing: 0.05em;'>CONVERSATIONS</div>", unsafe_allow_html=True)
         for c in chats:
             is_active = (c["chat_id"] == active_chat_id)
             btn_type = "primary" if is_active else "secondary"
             title = c["title"]
-            if len(title) > 22:
-                title = title[:20] + "..."
-            if st.button(title, key=f"chat_nav_sidebar_{c['chat_id']}", use_container_width=True, type=btn_type):
-                st.session_state.active_chat_id = c["chat_id"]
-                st.session_state.chat_title = c["title"]
-                st.rerun()
+            if len(title) > 20:
+                title = title[:18] + "..."
+            
+            rename_key = f"rename_active_{c['chat_id']}"
+            if rename_key in st.session_state and st.session_state[rename_key]:
+                col_input, col_save, col_cancel = st.columns([7, 1.5, 1.5])
+                with col_input:
+                    new_title_val = st.text_input(
+                        "Rename", 
+                        value=c["title"], 
+                        key=f"chat_rename_input_{c['chat_id']}", 
+                        label_visibility="collapsed"
+                    )
+                with col_save:
+                    if st.button("💾", key=f"chat_save_btn_{c['chat_id']}", use_container_width=True, help="Save"):
+                        if new_title_val.strip():
+                            db.rename_chat(c["chat_id"], new_title_val.strip())
+                            if is_active:
+                                st.session_state.chat_title = new_title_val.strip()
+                        st.session_state[rename_key] = False
+                        st.rerun()
+                with col_cancel:
+                    if st.button("❌", key=f"chat_cancel_btn_{c['chat_id']}", use_container_width=True, help="Cancel"):
+                        st.session_state[rename_key] = False
+                        st.rerun()
+            else:
+                col_chat, col_ren, col_del = st.columns([7, 1.5, 1.5])
+                with col_chat:
+                    if st.button(f"💬 {title}", key=f"chat_nav_sidebar_{c['chat_id']}", use_container_width=True, type=btn_type):
+                        # Auto-delete previous active workspace if switching away and it has 0 messages
+                        if active_chat_id and active_chat_id != c["chat_id"]:
+                            history = db.get_chat_history(active_chat_id)
+                            if not history:
+                                db.delete_chat(active_chat_id)
+                                chat_dir = f"doc_store/users/{user_id}/chats/{active_chat_id}"
+                                shutil.rmtree(chat_dir, ignore_errors=True)
+                                get_doc_system.clear()
+
+                        st.session_state.active_chat_id = c["chat_id"]
+                        st.session_state.chat_title = c["title"]
+                        st.session_state.messages = []
+                        st.rerun()
+                with col_ren:
+                    if st.button("✏️", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True, help="Rename Workspace"):
+                        st.session_state[rename_key] = True
+                        st.rerun()
+                with col_del:
+                    if st.button("🗑️", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True, help="Delete Workspace"):
+                        # Delete from database
+                        db.delete_chat(c["chat_id"])
+                        
+                        # Clean up local workspace files
+                        chat_dir = f"doc_store/users/{user_id}/chats/{c['chat_id']}"
+                        shutil.rmtree(chat_dir, ignore_errors=True)
+                        get_doc_system.clear()
+                        
+                        # Handle redirect if the deleted chat was the active one
+                        if c["chat_id"] == active_chat_id:
+                            remaining_chats = db.list_chats(user_id)
+                            st.session_state.active_chat_id = remaining_chats[0]["chat_id"] if remaining_chats else None
+                            st.session_state.chat_title = remaining_chats[0]["title"] if remaining_chats else None
+                        st.rerun()
 
     # 5. User Profile Footer & Logout
     st.markdown("---")
@@ -1298,11 +1436,22 @@ with tab_chat:
         <div class="hero-container" style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 3rem 1.5rem;">
             <img src="data:image/png;base64,{base64_logo}" style="width: 80px; height: 80px; object-fit: contain; margin-bottom: 1.5rem; filter: drop-shadow(0 4px 10px rgba(59, 130, 246, 0.25));"/>
             <div class="hero-title">Adaptive Workspace</div>
-            <div class="hero-subtitle">
+            <div class="hero-subtitle" style="margin-bottom: 2rem;">
                 Select or create a workspace in the sidebar to start chatting with your PDF documents.
             </div>
         </div>
         """, unsafe_allow_html=True)
+        
+        _, btn_col, _ = st.columns([3, 2, 3])
+        with btn_col:
+            if st.button("➕ Create New Workspace", use_container_width=True, type="primary", key="empty_state_create_workspace"):
+                provider = "groq"
+                model = "llama-3.3-70b-versatile"
+                new_chat = db.create_chat(user_id, "New Chat", provider, model)
+                st.session_state.active_chat_id = new_chat["chat_id"]
+                st.session_state.chat_title = new_chat["title"]
+                st.session_state.messages = []
+                st.rerun()
     else:
         # Show step-by-step onboarding flow if no messages are present
         if not st.session_state.messages:
@@ -1500,6 +1649,16 @@ with tab_chat:
             # Append & Save User Message
             db.save_message(active_chat_id, "user", prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # Auto-rename if the chat is currently titled "New Chat" (case-insensitive) and this is the first message
+            is_new_chat = (active_chat and active_chat["title"].lower() == "new chat") or (st.session_state.get("chat_title") and st.session_state.get("chat_title").lower() == "new chat")
+            if is_new_chat and len(st.session_state.messages) == 1:
+                # Generate a short clean title using LLM or fallback
+                base_title = generate_workspace_title(user_id, prompt, active_chat)
+                new_title = resolve_unique_title(user_id, base_title)
+                
+                db.rename_chat(active_chat_id, new_title)
+                st.session_state.chat_title = new_title
         else:
             prompt = None
 
@@ -1744,6 +1903,9 @@ with tab_settings:
             st.markdown("##### Danger Zone")
             if st.button("Delete Workspace", type="primary", use_container_width=True, key="settings_del_workspace_action"):
                 db.delete_chat(active_chat_id)
+                chat_dir = f"doc_store/users/{user_id}/chats/{active_chat_id}"
+                shutil.rmtree(chat_dir, ignore_errors=True)
+                get_doc_system.clear()
                 chats = db.list_chats(user_id)
                 st.session_state.active_chat_id = chats[0]["chat_id"] if chats else None
                 st.rerun()
