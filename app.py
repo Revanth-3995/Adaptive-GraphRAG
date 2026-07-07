@@ -163,12 +163,11 @@ div[data-testid="stPopoverBody"] button {
     border: none !important;
     color: #ececec !important;
     font-size: 0.82rem !important;
-    padding: 0.4rem 0.75rem 0.4rem 2.2rem !important;
+    padding: 0.45rem 0.75rem !important;
     border-radius: 6px !important;
     width: 100% !important;
     display: flex !important;
     align-items: center !important;
-    gap: 8px !important;
     position: relative !important;
 }
 div[data-testid="stPopoverBody"] button:hover {
@@ -1457,10 +1456,10 @@ with st.sidebar:
                         st.rerun()
                 with col_menu:
                     with st.popover("…", use_container_width=True, help="Chat actions"):
-                        if st.button("Rename", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True):
+                        if st.button("\u00a0\u00a0\u00a0\u00a0Rename", key=f"chat_ren_sidebar_{c['chat_id']}", use_container_width=True):
                             st.session_state[rename_key] = True
                             st.rerun()
-                        if st.button("Delete", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True):
+                        if st.button("\u00a0\u00a0\u00a0\u00a0Delete", key=f"chat_del_sidebar_{c['chat_id']}", use_container_width=True):
                             # Delete from database
                             db.delete_chat(c["chat_id"])
                             
