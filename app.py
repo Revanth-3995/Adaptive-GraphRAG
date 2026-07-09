@@ -269,6 +269,9 @@ div.stButton > button[kind="secondary"]:hover {
 }
 
 /* ─── Chat Messages ─── */
+div[data-testid="stChatMessage"] > *:not([data-testid="stChatMessageContent"]) {
+    display: none !important;
+}
 div[data-testid="stChatMessageAvatar"] {
     display: none !important;
 }
